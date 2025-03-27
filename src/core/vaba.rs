@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use super::vbba_core::VbbaCore;
+use super::vaba_core::VabaCore;
 
 pub struct Vbba {
     core_handle: JoinHandle<std::result::Result<(), Error>>,
@@ -22,7 +22,7 @@ impl Vbba {
         let (tx_api, rx_api) = unbounded_channel();
         let (tx_shutdown, rx_shutdown) = oneshot::channel::<()>();
 
-        let core = VbbaCore::new(rx_api, rx_shutdown);
+        let core = VabaCore::new(rx_api, rx_shutdown);
         let core_handle = spawn(core.main());
         Self {
             core_handle,

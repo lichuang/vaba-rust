@@ -17,7 +17,7 @@ struct KeyState {
     pub value: Value,
 }
 
-struct VbbaState {
+struct VabaState {
     // the highest view number for which the party ever received
     // a view-change message that includes a lock that was delivered
     // in the Proposal-Promotion of the chosen leader of this view.
@@ -31,8 +31,8 @@ struct VbbaState {
     pub key: Option<KeyState>,
 }
 
-pub struct VbbaCore {
-    state: VbbaState,
+pub struct VabaCore {
+    state: VabaState,
 
     rx_api: UnboundedReceiver<ProposalMessage>,
 
@@ -41,19 +41,19 @@ pub struct VbbaCore {
     proposal_values: Arc<Mutex<Vec<ProposalMessage>>>,
 }
 
-impl Default for VbbaState {
+impl Default for VabaState {
     fn default() -> Self {
         Self { lock: 0, key: None }
     }
 }
 
-impl VbbaCore {
+impl VabaCore {
     pub fn new(
         rx_api: UnboundedReceiver<ProposalMessage>,
         rx_shutdown: oneshot::Receiver<()>,
     ) -> Self {
         let core = Self {
-            state: VbbaState::default(),
+            state: VabaState::default(),
             rx_api,
             rx_shutdown,
             proposal_values: Arc::new(Mutex::new(Vec::new())),
@@ -73,6 +73,11 @@ impl VbbaCore {
     }
 
     pub async fn main(mut self) -> Result<()> {
+        Ok(())
+    }
+
+    // core of VABA algorithm
+    async fn core(&mut self) -> Result<()> {
         Ok(())
     }
 }
