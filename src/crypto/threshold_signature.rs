@@ -1,5 +1,5 @@
-use crate::base::Message;
 use crate::base::NodeId;
+use crate::base::Value;
 use anyhow::Error;
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -45,12 +45,12 @@ impl ThresholdSignatureScheme {
     }
 
     // given party index i and message, return a signature-share of i
-    pub fn share_sign(&self, i: NodeId, msg: &Message) -> Result<SignatureShare> {
+    pub fn share_sign(&self, i: NodeId, msg: &Value) -> Result<SignatureShare> {
         Ok(self.get_party(i)?.sign(msg))
     }
 
     // validate a share sign of message by node i
-    pub fn share_validate(&self, i: NodeId, msg: &Message, share_sign: &SignatureShare) -> bool {
+    pub fn share_validate(&self, i: NodeId, msg: &Value, share_sign: &SignatureShare) -> bool {
         let party = self.parties.get(&i);
         if let Some(party) = party {
             party.validate(msg, share_sign)
@@ -76,7 +76,7 @@ impl ThresholdSignatureScheme {
     }
 
     // validate a message signature
-    pub fn threshold_validate(&self, msg: &Message, sign: &Signature) -> bool {
+    pub fn threshold_validate(&self, msg: &Value, sign: &Signature) -> bool {
         self.pk_set.public_key().verify(sign, msg)
     }
 }
@@ -86,18 +86,18 @@ impl Party {
         Self { sk_share, pk_share }
     }
 
-    pub fn sign(&self, msg: &Message) -> SignatureShare {
+    pub fn sign(&self, msg: &Value) -> SignatureShare {
         self.sk_share.sign(msg)
     }
 
-    pub fn validate(&self, msg: &Message, sign: &SignatureShare) -> bool {
+    pub fn validate(&self, msg: &Value, sign: &SignatureShare) -> bool {
         self.pk_share.verify(sign, msg.as_bytes())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::base::Result;
+    use anyhow::Result;
     use threshold_crypto::SignatureShare;
 
     use super::{NodeId, ThresholdSignatureScheme};

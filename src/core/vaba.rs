@@ -14,6 +14,7 @@ use actix_web::HttpServer;
 
 use crate::base::ClientProposalMessage;
 use crate::base::ClusterConfig;
+use crate::base::Message;
 use crate::base::MessageId;
 use crate::base::NodeId;
 use crate::base::ProposalMessage;
@@ -32,14 +33,10 @@ use super::vaba_core::VabaCore;
 #[derive(Debug)]
 pub struct Vaba {
     core_handle: JoinHandle<std::result::Result<(), Error>>,
-    pub tx_api: UnboundedSender<ProposalMessage>,
+    pub tx_api: UnboundedSender<Message>,
     tx_shutdown: oneshot::Sender<()>,
-    node_id: NodeId,
+    pub node_id: NodeId,
     cluster: ClusterConfig,
-}
-
-fn generate_message_id(node_id: NodeId, msg_id: u32) -> u64 {
-    ((node_id as u64) << 32) | (msg_id as u64)
 }
 
 static INSTANCE: OnceLock<Arc<Vaba>> = OnceLock::new();
@@ -71,6 +68,8 @@ impl Vaba {
                 .wrap(middleware::Compress::default())
                 // client RPC
                 .service(handlers::proposal)
+                // node internal RPC
+                .service(handlers::promote)
         });
 
         let node_id = node_id;

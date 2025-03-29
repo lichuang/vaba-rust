@@ -1,17 +1,22 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use log::error;
 use log::info;
 use reqwest::Client;
+use serde::Serialize;
+use serde::Serializer;
 use threshold_crypto::Signature;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
 use crate::base::ClusterConfig;
+use crate::base::Message;
 use crate::base::MessageId;
 use crate::base::NodeId;
 use crate::base::PromoteMessage;
+use crate::base::PromoteMessageResp;
 use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
 use crate::base::Step;
@@ -20,10 +25,15 @@ use crate::base::View;
 use crate::base::ID;
 use crate::crypto::ThresholdSignatureScheme;
 use anyhow::Result;
+use futures::FutureExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::Metrics;
 use super::PromoteData;
 use super::PromoteValue;
+use super::PromoteValueWithProof;
+use super::Proof;
+use super::ProofValue;
 
 struct KeyState {
     pub proof: Signature,
@@ -57,6 +67,12 @@ enum PromoteState {
     WaitPromoteResponse((Step, PromoteData)),
 }
 
+struct DeliverValue {
+    key: Option<PromoteValueWithProof>,
+    lock: Option<PromoteValueWithProof>,
+    commit: Option<PromoteValueWithProof>,
+}
+
 pub struct VabaCore {
     node_id: NodeId,
 
@@ -68,13 +84,23 @@ pub struct VabaCore {
 
     cluster: ClusterConfig,
 
-    rx_api: UnboundedReceiver<ProposalMessage>,
+    rx_api: UnboundedReceiver<Message>,
 
     rx_shutdown: oneshot::Receiver<()>,
+
+    http_client: Client,
 
     proposal_values: Arc<Mutex<Vec<(MessageId, Value)>>>,
 
     proposal_sender: Arc<Mutex<BTreeMap<MessageId, oneshot::Sender<ProposalMessageResp>>>>,
+
+    // save all the message ids have seen
+    seen: BTreeSet<MessageId>,
+
+    metrics: Metrics,
+
+    // node id -> {view, DeliverValue}
+    deliver: Arc<Mutex<BTreeMap<NodeId, BTreeMap<View, DeliverValue>>>>,
 
     threshold_signature: ThresholdSignatureScheme,
 }
@@ -92,7 +118,7 @@ impl Default for VabaState {
 impl VabaCore {
     pub fn new(
         node_id: NodeId,
-        rx_api: UnboundedReceiver<ProposalMessage>,
+        rx_api: UnboundedReceiver<Message>,
         rx_shutdown: oneshot::Receiver<()>,
         cluster: ClusterConfig,
     ) -> Self {
@@ -105,9 +131,13 @@ impl VabaCore {
             promote_state: PromoteState::Init,
             rx_api,
             rx_shutdown,
+            http_client: Client::new(),
             cluster,
             proposal_values: Arc::new(Mutex::new(Vec::new())),
             proposal_sender: Arc::new(Mutex::new(BTreeMap::new())),
+            seen: BTreeSet::new(),
+            metrics: Metrics::new(),
+            deliver: Arc::new(Mutex::new(BTreeMap::new())),
             threshold_signature: ThresholdSignatureScheme::new(threshold, total),
         };
 
@@ -118,7 +148,39 @@ impl VabaCore {
         Ok(())
     }
 
-    async fn proposal(&self, message: ProposalMessage) -> Result<()> {
+    pub async fn main(mut self) -> Result<()> {
+        self.main_loop().await
+    }
+
+    async fn main_loop(&mut self) -> Result<()> {
+        loop {
+            self.vaba_core().await?;
+
+            futures::select_biased! {
+                msg_res = self.rx_api.recv().fuse() => {
+                    match msg_res {
+                        Some(msg) => self.handle_message(msg).await?,
+                        None => {
+                            info!("all rx_api senders are dropped");
+                            break;
+                        }
+                    };
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_message(&mut self, msg: Message) -> Result<()> {
+        match msg {
+            Message::Proposal(proposal) => self.handle_proposal_message(proposal).await?,
+            Message::Promote(promote) => self.handle_promote_message(promote).await?,
+        }
+        Ok(())
+    }
+
+    async fn handle_proposal_message(&mut self, message: ProposalMessage) -> Result<()> {
+        self.metrics.incr_recv_proposal();
         {
             let mut proposal_values = self.proposal_values.lock().await;
             proposal_values.push((message.message_id, message.value.clone()));
@@ -130,10 +192,162 @@ impl VabaCore {
         Ok(())
     }
 
-    pub async fn main(mut self) -> Result<()> {
+    async fn handle_promote_message(&mut self, promote: PromoteMessage) -> Result<()> {
+        self.metrics.incr_recv_promote();
+        let from = &promote.node_id;
+        let address = if let Some(address) = self.cluster.nodes.get(from) {
+            address
+        } else {
+            return Ok(());
+        };
+        if self.seen.contains(&promote.value.message_id) {
+            return Ok(());
+        }
+        if !self.external_provable_broadcast_validate(&promote)? {
+            return Ok(());
+        }
+
+        self.seen.insert(promote.value.message_id);
+
+        // calculate share sign of this node
+        let proof_value = ProofValue {
+            id: promote.node_id,
+            // use last step signature as in proof
+            step: promote.step - 1,
+            value: promote.value.clone(),
+        };
+        let value_string = serde_json::to_string(&proof_value)?;
+        let share_sign = self
+            .threshold_signature
+            .share_sign(self.node_id, &value_string)?;
+
+        // deliver promote value
+        self.deliver(&promote);
+
+        let share_sign = self
+            .threshold_signature
+            .share_sign(self.node_id, &promote.value.value)?;
+
+        let resp = PromoteMessageResp {
+            node_id: self.node_id,
+            message_id: promote.value.message_id,
+            share_sign,
+        };
+        let json = serde_json::to_string(&resp)?;
+
+        let uri = format!("http://{}/promote", address);
+        let resp = self
+            .http_client
+            .post(uri)
+            .header("Content-Type", "application/json")
+            .body(json.clone())
+            .send()
+            .await;
+        if let Err(e) = resp {
+            error!(
+                "send promote data to node {}/{} error: {:?}",
+                from, address, e
+            );
+        }
+
+        self.metrics.incr_send_promote_resp();
+
         Ok(())
     }
 
+    fn external_provable_broadcast_validate(&self, promote: &PromoteMessage) -> Result<bool> {
+        let step = promote.step;
+
+        // step = 1 case
+        if step == 1 {
+            if let Proof::External(external_proof) = &promote.proof {
+                // for now external proof always validate true
+                return Ok(true);
+            } else {
+                error!(
+                    "step 1 MUST with external proof, message from {} id {}",
+                    promote.node_id, promote.value.message_id
+                );
+                return Ok(false);
+            }
+        }
+
+        // step > 1 cases
+        let signature = if let Proof::In(signature) = &promote.proof {
+            signature
+        } else {
+            error!(
+                "step > 1 MUST with in proof of last step, message from {} id {}",
+                promote.node_id, promote.value.message_id
+            );
+            return Ok(false);
+        };
+        let proof_value = ProofValue {
+            id: promote.node_id,
+            // use last step signature as in proof
+            step: step - 1,
+            value: promote.value.clone(),
+        };
+        let value_string = serde_json::to_string(&proof_value)?;
+        let validate = self
+            .threshold_signature
+            .threshold_validate(&value_string, signature);
+
+        Ok(validate)
+    }
+
+    async fn deliver(&self, promote: &PromoteMessage) {
+        let step = promote.step;
+        if step == 1 {
+            return;
+        }
+        let from = promote.node_id;
+        let view = promote.view;
+        let signature = if let Proof::In(signature) = &promote.proof {
+            signature
+        } else {
+            error!(
+                "step > 1 MUST with in proof of last step, message from {} id {}",
+                promote.node_id, promote.value.message_id
+            );
+            return;
+        };
+        let value_with_proof = PromoteValueWithProof {
+            value: promote.value.value.clone(),
+            message_id: promote.value.message_id.clone(),
+            proof: signature.clone(),
+        };
+
+        info!(
+            "node {} deliver step {} from node {} message_id {}",
+            self.node_id, step, promote.node_id, promote.value.message_id
+        );
+
+        let mut deliver = self.deliver.lock().await;
+        let mut node_view_deliver = if let Some(node_view_deliver) = deliver.get_mut(&from) {
+            node_view_deliver
+        } else {
+            deliver.insert(from, BTreeMap::new());
+            deliver.get_mut(&from).unwrap()
+        };
+
+        let mut deliver = if let Some(view_deliver) = node_view_deliver.get_mut(&view) {
+            view_deliver
+        } else {
+            node_view_deliver.insert(view, DeliverValue::new());
+            node_view_deliver.get_mut(&view).unwrap()
+        };
+
+        if step == 2 {
+            deliver.key = Some(value_with_proof);
+        } else if step == 3 {
+            deliver.lock = Some(value_with_proof);
+        } else {
+            deliver.commit = Some(value_with_proof);
+        }
+    }
+
+    // for now external proof always validate true
     fn external_proof_of_value(&self, value: &Value) -> String {
         value.clone()
     }
@@ -151,6 +365,7 @@ impl VabaCore {
                 }
                 PromoteState::Promote(data) => {
                     self.promote_data(1, data.clone()).await?;
+                    break;
                 }
                 _ => {}
             }
@@ -209,10 +424,10 @@ impl VabaCore {
             proof: promote_data.proof.clone(),
         };
         let json = serde_json::to_string(&message)?;
-        let client = Client::new();
         for (node_id, address) in &self.cluster.nodes {
             let uri = format!("http://{}/promote", address);
-            let resp = client
+            let resp = self
+                .http_client
                 .post(uri)
                 .header("Content-Type", "application/json")
                 .body(json.clone())
@@ -224,7 +439,19 @@ impl VabaCore {
                     node_id, address, e
                 );
             }
+
+            self.metrics.incr_send_promote();
         }
         Ok(())
+    }
+}
+
+impl DeliverValue {
+    pub fn new() -> Self {
+        Self {
+            key: None,
+            lock: None,
+            commit: None,
+        }
     }
 }

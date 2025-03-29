@@ -3,9 +3,16 @@ use tokio::sync::oneshot;
 
 use crate::core::{PromoteData, PromoteValue, Proof};
 
-use super::{MessageId, NodeId, Step, Value, View, ID};
+use super::{MessageId, NodeId, Step, Value, View};
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+// message between http handlers and vaba core
+pub enum Message {
+    Proposal(ProposalMessage),
+
+    Promote(PromoteMessage),
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ClientProposalMessage {
     pub message_id: MessageId,
     pub value: Value,
@@ -23,7 +30,7 @@ pub struct ProposalMessageResp {
     pub error: Option<String>,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PromoteMessage {
     pub node_id: NodeId,
 

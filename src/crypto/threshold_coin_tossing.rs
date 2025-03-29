@@ -5,8 +5,8 @@ use threshold_crypto::SecretKeySet;
 use threshold_crypto::SignatureShare;
 use threshold_crypto::SIG_SIZE;
 
-use crate::base::Message;
 use crate::base::NodeId;
+use crate::base::Value;
 use crate::crypto::Party;
 use anyhow::Error;
 use anyhow::Result;
@@ -45,12 +45,12 @@ impl ThresholdCoinTossing {
     }
 
     // return party i's coin share of message
-    pub fn coin_share(&self, i: NodeId, msg: &Message) -> Result<CoinShare> {
+    pub fn coin_share(&self, i: NodeId, msg: &Value) -> Result<CoinShare> {
         Ok(self.get_party(i)?.sign(msg))
     }
 
     // validate the party i's coin share of message
-    pub fn coin_share_validate(&self, i: NodeId, msg: &Message, share: &CoinShare) -> bool {
+    pub fn coin_share_validate(&self, i: NodeId, msg: &Value, share: &CoinShare) -> bool {
         let party = self.parties.get(&i);
         if let Some(party) = party {
             party.validate(msg, share)
@@ -60,7 +60,7 @@ impl ThresholdCoinTossing {
     }
 
     // given coin share set, return id of selected party
-    pub fn coin_toss(&self, msg: &Message, shares: &[(NodeId, CoinShare)]) -> Result<NodeId> {
+    pub fn coin_toss(&self, msg: &Value, shares: &[(NodeId, CoinShare)]) -> Result<NodeId> {
         let sign_filter = shares.iter().filter_map(|(id, sign)| {
             if let Some(node) = self.parties.get(id) {
                 if node.validate(msg, sign) {
