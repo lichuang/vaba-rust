@@ -5,8 +5,8 @@ edition = "2021"
 description = ""
 
 [dependencies]
+actix-web = "4"
 anyhow = { version = "1.0.65" }
-thiserror = { version = "1" }
 tokio = { version = "1.35.0", features = ["full"] }
 rand = "0.7.3"
 threshold_crypto = "0.4.0"

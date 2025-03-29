@@ -1,3 +1,4 @@
+mod handlers;
 mod types;
 mod vaba;
 mod vaba_core;

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use log::error;
 use log::info;
 use reqwest::Client;
 use threshold_crypto::Signature;
@@ -209,14 +210,20 @@ impl VabaCore {
         };
         let json = serde_json::to_string(&message)?;
         let client = Client::new();
-        for (_node_id, address) in &self.cluster.nodes {
+        for (node_id, address) in &self.cluster.nodes {
             let uri = format!("http://{}/promote", address);
-            let _resp = client
+            let resp = client
                 .post(uri)
                 .header("Content-Type", "application/json")
                 .body(json.clone())
                 .send()
                 .await;
+            if let Err(e) = resp {
+                error!(
+                    "send promote data to node {}/{} error: {:?}",
+                    node_id, address, e
+                );
+            }
         }
         Ok(())
     }

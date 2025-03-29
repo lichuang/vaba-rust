@@ -5,15 +5,22 @@ use crate::core::{PromoteData, PromoteValue, Proof};
 
 use super::{MessageId, NodeId, Step, Value, View, ID};
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClientProposalMessage {
+    pub message_id: MessageId,
+    pub value: Value,
+}
+
 pub struct ProposalMessage {
     pub value: Value,
     pub sender: oneshot::Sender<ProposalMessageResp>,
     pub message_id: MessageId,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProposalMessageResp {
-    ok: bool,
-    error: Option<String>,
+    pub ok: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

@@ -1,60 +1,82 @@
-use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
+use actix_web::post;
+use actix_web::web;
+use actix_web::web::Data;
+use actix_web::web::Json;
+use actix_web::Responder;
+
+use actix_web::middleware;
+use actix_web::middleware::Logger;
+use actix_web::HttpServer;
+
+use crate::base::ClientProposalMessage;
 use crate::base::ClusterConfig;
 use crate::base::MessageId;
 use crate::base::NodeId;
 use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
 use crate::base::Value;
-use anyhow::Context;
 use anyhow::Error;
-use anyhow::Result;
 use tokio::spawn;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use super::handlers;
 use super::vaba_core::VabaCore;
 
+#[derive(Debug)]
 pub struct Vaba {
     core_handle: JoinHandle<std::result::Result<(), Error>>,
-    tx_api: UnboundedSender<ProposalMessage>,
+    pub tx_api: UnboundedSender<ProposalMessage>,
     tx_shutdown: oneshot::Sender<()>,
     node_id: NodeId,
+    cluster: ClusterConfig,
 }
 
 fn generate_message_id(node_id: NodeId, msg_id: u32) -> u64 {
     ((node_id as u64) << 32) | (msg_id as u64)
 }
 
+static INSTANCE: OnceLock<Arc<Vaba>> = OnceLock::new();
+
 impl Vaba {
-    pub fn new(node_id: NodeId, cluster: ClusterConfig) -> Self {
+    pub fn get_instance() -> &'static Arc<Vaba> {
+        INSTANCE.get().unwrap()
+    }
+
+    pub async fn start(node_id: NodeId, cluster: ClusterConfig) -> std::io::Result<()> {
         let (tx_api, rx_api) = unbounded_channel();
         let (tx_shutdown, rx_shutdown) = oneshot::channel::<()>();
 
-        let core = VabaCore::new(node_id, rx_api, rx_shutdown, cluster);
+        let core = VabaCore::new(node_id, rx_api, rx_shutdown, cluster.clone());
         let core_handle = spawn(core.main());
-        Self {
+        let vaba = Vaba {
             core_handle,
-            tx_api,
+            tx_api: tx_api.clone(),
             tx_shutdown,
             node_id,
-        }
-    }
-
-    pub async fn proposal(&self, message_id: MessageId, value: Value) -> Result<()> {
-        let (tx, rx) = oneshot::channel::<ProposalMessageResp>();
-        let message = ProposalMessage {
-            value: value.clone(),
-            sender: tx,
-            message_id,
+            cluster: cluster.clone(),
         };
-        let send_res = self.tx_api.send(message);
-        let resp = rx
-            .await
-            .context(format!("fail to recv response of proposal value {}", value))?;
+        INSTANCE.set(Arc::new(vaba)).unwrap();
+        // Start the actix-web server.
+        let server = HttpServer::new(move || {
+            actix_web::App::new()
+                .wrap(Logger::default())
+                .wrap(Logger::new("%a %{User-Agent}i"))
+                .wrap(middleware::Compress::default())
+                // client RPC
+                .service(handlers::proposal)
+        });
 
-        Ok(())
+        let node_id = node_id;
+        let address = cluster.nodes.get(&node_id).unwrap();
+        let x = server.bind(address)?;
+
+        x.run().await
     }
 }
