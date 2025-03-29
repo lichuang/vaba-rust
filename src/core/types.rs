@@ -20,9 +20,6 @@ pub struct PromoteValue {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PromoteData {
-    // step = [1, 4]
-    pub step: Step,
-
     pub value: PromoteValue,
 
     pub proof: Proof,

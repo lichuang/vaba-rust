@@ -1,7 +1,7 @@
-use crate::base::Error;
 use crate::base::Message;
 use crate::base::NodeId;
-use crate::base::Result;
+use anyhow::Error;
+use anyhow::Result;
 use std::collections::BTreeMap;
 
 use threshold_crypto::{
@@ -39,10 +39,9 @@ impl ThresholdSignatureScheme {
     }
 
     fn get_party(&self, i: NodeId) -> Result<&Party> {
-        self.parties.get(&i).ok_or(Error::cluster_error(format!(
-            "Cannot find {:?} party in cluster",
-            i
-        )))
+        self.parties
+            .get(&i)
+            .ok_or(Error::msg(format!("Cannot find {:?} party in cluster", i)))
     }
 
     // given party index i and message, return a signature-share of i
@@ -73,7 +72,7 @@ impl ThresholdSignatureScheme {
         Ok(self
             .pk_set
             .combine_signatures(sign_filter)
-            .map_err(Error::crypto_error("fail to combine_signatures"))?)
+            .map_err(|e| anyhow::anyhow!("Threshold crypto combine_signatures error: {:?}", e))?)
     }
 
     // validate a message signature

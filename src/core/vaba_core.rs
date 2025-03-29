@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use log::info;
+use reqwest::Client;
 use threshold_crypto::Signature;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
@@ -9,13 +10,15 @@ use tokio::sync::Mutex;
 use crate::base::ClusterConfig;
 use crate::base::MessageId;
 use crate::base::NodeId;
+use crate::base::PromoteMessage;
 use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
-use crate::base::Result;
 use crate::base::Step;
 use crate::base::Value;
 use crate::base::View;
+use crate::base::ID;
 use crate::crypto::ThresholdSignatureScheme;
+use anyhow::Result;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::PromoteData;
@@ -54,7 +57,9 @@ enum PromoteState {
 }
 
 pub struct VabaCore {
-    id: NodeId,
+    node_id: NodeId,
+
+    id: ID,
 
     state: VabaState,
 
@@ -85,7 +90,7 @@ impl Default for VabaState {
 
 impl VabaCore {
     pub fn new(
-        id: NodeId,
+        node_id: NodeId,
         rx_api: UnboundedReceiver<ProposalMessage>,
         rx_shutdown: oneshot::Receiver<()>,
         cluster: ClusterConfig,
@@ -93,7 +98,8 @@ impl VabaCore {
         let total = cluster.nodes.len();
         let threshold = 2 * (total as f32 / 3 as f32) as usize + 1;
         let core = Self {
-            id,
+            node_id,
+            id: format!("node_{}", node_id),
             state: VabaState::default(),
             promote_state: PromoteState::Init,
             rx_api,
@@ -155,7 +161,6 @@ impl VabaCore {
         let current_view = self.state.current;
         let promote_value = if let Some(key) = &self.state.key {
             PromoteData {
-                step: 1,
                 value: key.value.clone(),
                 proof: super::Proof::External(self.external_proof_of_value(&key.value.value)),
                 view: current_view,
@@ -167,7 +172,6 @@ impl VabaCore {
             }
             let value = proposal_values.remove(0);
             PromoteData {
-                step: 1,
                 proof: super::Proof::External(self.external_proof_of_value(&value.1)),
                 value: PromoteValue {
                     value: value.1,
@@ -194,9 +198,26 @@ impl VabaCore {
         }
     }
 
-    //
     async fn promote_data(&mut self, step: Step, promote_data: PromoteData) -> Result<()> {
         self.promote_state = PromoteState::WaitPromoteResponse((step, promote_data.clone()));
+        let message = PromoteMessage {
+            step,
+            node_id: self.node_id,
+            value: promote_data.value.clone(),
+            view: promote_data.view,
+            proof: promote_data.proof.clone(),
+        };
+        let json = serde_json::to_string(&message)?;
+        let client = Client::new();
+        for (_node_id, address) in &self.cluster.nodes {
+            let uri = format!("http://{}/promote", address);
+            let _resp = client
+                .post(uri)
+                .header("Content-Type", "application/json")
+                .body(json.clone())
+                .send()
+                .await;
+        }
         Ok(())
     }
 }

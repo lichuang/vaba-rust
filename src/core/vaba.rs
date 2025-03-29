@@ -1,13 +1,14 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::base::ClusterConfig;
-use crate::base::Error;
 use crate::base::MessageId;
 use crate::base::NodeId;
 use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
-use crate::base::Result;
 use crate::base::Value;
+use anyhow::Context;
+use anyhow::Error;
+use anyhow::Result;
 use tokio::spawn;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedSender;
@@ -50,10 +51,9 @@ impl Vaba {
             message_id,
         };
         let send_res = self.tx_api.send(message);
-        let resp = rx.await.map_err(Error::oneshot_recv_error(format!(
-            "fail to recv response of proposal value {}",
-            value
-        )))?;
+        let resp = rx
+            .await
+            .context(format!("fail to recv response of proposal value {}", value))?;
 
         Ok(())
     }

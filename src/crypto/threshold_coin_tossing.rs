@@ -5,11 +5,11 @@ use threshold_crypto::SecretKeySet;
 use threshold_crypto::SignatureShare;
 use threshold_crypto::SIG_SIZE;
 
-use crate::base::Error;
 use crate::base::Message;
 use crate::base::NodeId;
-use crate::base::Result;
 use crate::crypto::Party;
+use anyhow::Error;
+use anyhow::Result;
 
 pub type CoinShare = SignatureShare;
 
@@ -39,10 +39,9 @@ impl ThresholdCoinTossing {
     }
 
     fn get_party(&self, i: NodeId) -> Result<&Party> {
-        self.parties.get(&i).ok_or(Error::cluster_error(format!(
-            "Cannot find {:?} party in cluster",
-            i
-        )))
+        self.parties
+            .get(&i)
+            .ok_or(Error::msg(format!("Cannot find {:?} party in cluster", i)))
     }
 
     // return party i's coin share of message
@@ -77,7 +76,7 @@ impl ThresholdCoinTossing {
         let f: [u8; SIG_SIZE] = self
             .pk_set
             .combine_signatures(sign_filter)
-            .map_err(Error::crypto_error("fail to combine_signatures"))?
+            .map_err(|e| anyhow::anyhow!("Threshold crypto combine_signatures error: {:?}", e))?
             .to_bytes();
 
         let s: u64 = f.iter().map(|&x| x as u64).sum();
@@ -91,7 +90,8 @@ impl ThresholdCoinTossing {
 mod tests {
 
     use super::{CoinShare, ThresholdCoinTossing};
-    use crate::base::{NodeId, Result};
+    use crate::base::NodeId;
+    use anyhow::Result;
 
     #[test]
     fn test_threshold_coin_tossing() -> Result<()> {
@@ -136,7 +136,7 @@ mod tests {
         }
         let mut node_ids = Vec::new();
         for share_signs in &select_share_signs {
-            let node_id = threshold_coin_tossing.coin_toss(&message, share_signs);
+            let node_id = threshold_coin_tossing.coin_toss(&message, share_signs)?;
             node_ids.push(node_id);
         }
         let first = node_ids.first().unwrap();

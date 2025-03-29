@@ -1,9 +1,9 @@
 use threshold_crypto::SignatureShare;
 use tokio::sync::oneshot;
 
-use crate::core::PromoteData;
+use crate::core::{PromoteData, PromoteValue, Proof};
 
-use super::{MessageId, Value, ID};
+use super::{MessageId, NodeId, Step, Value, View, ID};
 
 pub struct ProposalMessage {
     pub value: Value,
@@ -16,14 +16,22 @@ pub struct ProposalMessageResp {
     error: Option<String>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct PromoteMessage {
-    pub id: ID,
-    pub data: PromoteData,
+    pub node_id: NodeId,
+
+    pub step: Step,
+
+    pub value: PromoteValue,
+
+    pub proof: Proof,
+
+    pub view: View,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct PromoteMessageResp {
-    pub id: ID,
+    pub node_id: NodeId,
+    pub message_id: MessageId,
     pub share_sign: SignatureShare,
 }
