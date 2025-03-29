@@ -6,9 +6,9 @@ use threshold_crypto::SignatureShare;
 use threshold_crypto::SIG_SIZE;
 
 use crate::base::Error;
+use crate::base::Message;
+use crate::base::NodeId;
 use crate::base::Result;
-use crate::crypto::Message;
-use crate::crypto::Nodeid;
 use crate::crypto::Party;
 
 pub type CoinShare = SignatureShare;
@@ -16,7 +16,7 @@ pub type CoinShare = SignatureShare;
 pub struct ThresholdCoinTossing {
     pk_set: PublicKeySet,
 
-    parties: BTreeMap<Nodeid, Party>,
+    parties: BTreeMap<NodeId, Party>,
 }
 
 impl ThresholdCoinTossing {
@@ -32,13 +32,13 @@ impl ThresholdCoinTossing {
             let sk_share = sk_set.secret_key_share(id);
             let pk_share = pk_set.public_key_share(id);
             let party = Party::new(sk_share, pk_share);
-            parties.insert(id as Nodeid, party);
+            parties.insert(id as NodeId, party);
         }
 
         Self { pk_set, parties }
     }
 
-    fn get_party(&self, i: Nodeid) -> Result<&Party> {
+    fn get_party(&self, i: NodeId) -> Result<&Party> {
         self.parties.get(&i).ok_or(Error::cluster_error(format!(
             "Cannot find {:?} party in cluster",
             i
@@ -46,12 +46,12 @@ impl ThresholdCoinTossing {
     }
 
     // return party i's coin share of message
-    pub fn coin_share(&self, i: Nodeid, msg: &Message) -> Result<CoinShare> {
+    pub fn coin_share(&self, i: NodeId, msg: &Message) -> Result<CoinShare> {
         Ok(self.get_party(i)?.sign(msg))
     }
 
     // validate the party i's coin share of message
-    pub fn coin_share_validate(&self, i: Nodeid, msg: &Message, share: &CoinShare) -> bool {
+    pub fn coin_share_validate(&self, i: NodeId, msg: &Message, share: &CoinShare) -> bool {
         let party = self.parties.get(&i);
         if let Some(party) = party {
             party.validate(msg, share)
@@ -61,7 +61,7 @@ impl ThresholdCoinTossing {
     }
 
     // given coin share set, return id of selected party
-    pub fn coin_toss(&self, msg: &Message, shares: &[(Nodeid, CoinShare)]) -> Result<Nodeid> {
+    pub fn coin_toss(&self, msg: &Message, shares: &[(NodeId, CoinShare)]) -> Result<NodeId> {
         let sign_filter = shares.iter().filter_map(|(id, sign)| {
             if let Some(node) = self.parties.get(id) {
                 if node.validate(msg, sign) {
@@ -81,7 +81,7 @@ impl ThresholdCoinTossing {
             .to_bytes();
 
         let s: u64 = f.iter().map(|&x| x as u64).sum();
-        let node_ids: Vec<Nodeid> = self.parties.keys().cloned().collect();
+        let node_ids: Vec<NodeId> = self.parties.keys().cloned().collect();
 
         Ok(node_ids[s as usize % node_ids.len()])
     }
@@ -89,10 +89,9 @@ impl ThresholdCoinTossing {
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::Nodeid;
 
     use super::{CoinShare, ThresholdCoinTossing};
-    use crate::base::Result;
+    use crate::base::{NodeId, Result};
 
     #[test]
     fn test_threshold_coin_tossing() -> Result<()> {
@@ -102,12 +101,12 @@ mod tests {
         let message = "hello world".to_string();
 
         // generate share signs
-        let signature_shares: Vec<(Nodeid, CoinShare)> = (0..total)
+        let signature_shares: Vec<(NodeId, CoinShare)> = (0..total)
             .map(|i| {
                 (
-                    i as Nodeid,
+                    i as NodeId,
                     threshold_coin_tossing
-                        .coin_share(i as Nodeid, &message)
+                        .coin_share(i as NodeId, &message)
                         .unwrap(),
                 )
             })
@@ -121,8 +120,8 @@ mod tests {
         let mut select_share_signs = Vec::new();
         let mut signs = Vec::new();
         for i in 0..total {
-            let share = threshold_coin_tossing.coin_share(i as Nodeid, &message)?;
-            signs.push((i as Nodeid, share.clone()));
+            let share = threshold_coin_tossing.coin_share(i as NodeId, &message)?;
+            signs.push((i as NodeId, share.clone()));
         }
         for i in 0..total {
             let mut temp_sign = Vec::new();

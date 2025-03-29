@@ -1,4 +1,6 @@
 use crate::base::Error;
+use crate::base::Message;
+use crate::base::NodeId;
 use crate::base::Result;
 use std::collections::BTreeMap;
 
@@ -6,13 +8,10 @@ use threshold_crypto::{
     PublicKeySet, PublicKeyShare, SecretKeySet, SecretKeyShare, Signature, SignatureShare,
 };
 
-pub type Message = String;
-pub type Nodeid = u64;
-
 pub struct ThresholdSignatureScheme {
     pk_set: PublicKeySet,
 
-    parties: BTreeMap<Nodeid, Party>,
+    parties: BTreeMap<NodeId, Party>,
 }
 
 pub struct Party {
@@ -33,13 +32,13 @@ impl ThresholdSignatureScheme {
             let sk_share = sk_set.secret_key_share(id);
             let pk_share = pk_set.public_key_share(id);
             let party = Party::new(sk_share, pk_share);
-            parties.insert(id as Nodeid, party);
+            parties.insert(id as NodeId, party);
         }
 
         Self { pk_set, parties }
     }
 
-    fn get_party(&self, i: Nodeid) -> Result<&Party> {
+    fn get_party(&self, i: NodeId) -> Result<&Party> {
         self.parties.get(&i).ok_or(Error::cluster_error(format!(
             "Cannot find {:?} party in cluster",
             i
@@ -47,12 +46,12 @@ impl ThresholdSignatureScheme {
     }
 
     // given party index i and message, return a signature-share of i
-    pub fn share_sign(&self, i: Nodeid, msg: &Message) -> Result<SignatureShare> {
+    pub fn share_sign(&self, i: NodeId, msg: &Message) -> Result<SignatureShare> {
         Ok(self.get_party(i)?.sign(msg))
     }
 
     // validate a share sign of message by node i
-    pub fn share_validate(&self, i: Nodeid, msg: &Message, share_sign: &SignatureShare) -> bool {
+    pub fn share_validate(&self, i: NodeId, msg: &Message, share_sign: &SignatureShare) -> bool {
         let party = self.parties.get(&i);
         if let Some(party) = party {
             party.validate(msg, share_sign)
@@ -62,7 +61,7 @@ impl ThresholdSignatureScheme {
     }
 
     // return signature base on share sign sets
-    pub fn threshold_sign(&self, share_signs: &[(Nodeid, SignatureShare)]) -> Result<Signature> {
+    pub fn threshold_sign(&self, share_signs: &[(NodeId, SignatureShare)]) -> Result<Signature> {
         let sign_filter = share_signs.iter().filter_map(|(id, sign)| {
             if self.parties.contains_key(id) {
                 Some((*id, sign))
@@ -102,7 +101,7 @@ mod tests {
     use crate::base::Result;
     use threshold_crypto::SignatureShare;
 
-    use super::{Nodeid, ThresholdSignatureScheme};
+    use super::{NodeId, ThresholdSignatureScheme};
 
     #[test]
     fn test_threshold_signature_scheme() -> Result<()> {
@@ -112,12 +111,12 @@ mod tests {
         let message = "hello world".to_string();
 
         // generate share signs
-        let signature_shares: Vec<(Nodeid, SignatureShare)> = (0..total)
+        let signature_shares: Vec<(NodeId, SignatureShare)> = (0..total)
             .map(|i| {
                 (
-                    i as Nodeid,
+                    i as NodeId,
                     threshold_signature
-                        .share_sign(i as Nodeid, &message)
+                        .share_sign(i as NodeId, &message)
                         .unwrap(),
                 )
             })
@@ -127,7 +126,7 @@ mod tests {
             assert!(threshold_signature.share_validate(*i, &message, share_sign))
         }
 
-        let selected_shares: Vec<(Nodeid, SignatureShare)> = signature_shares
+        let selected_shares: Vec<(NodeId, SignatureShare)> = signature_shares
             .iter()
             .take(threshold + 1)
             .cloned()
