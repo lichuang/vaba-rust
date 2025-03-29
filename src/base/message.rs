@@ -1,7 +1,7 @@
 use threshold_crypto::SignatureShare;
 use tokio::sync::oneshot;
 
-use crate::core::{PromoteData, PromoteValue, Proof};
+use crate::core::{PromoteValue, Proof};
 
 use super::{MessageId, NodeId, Step, Value, View};
 
@@ -10,6 +10,8 @@ pub enum Message {
     Proposal(ProposalMessage),
 
     Promote(PromoteMessage),
+
+    PromoteAck(PromoteAckMessage),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -43,9 +45,10 @@ pub struct PromoteMessage {
     pub view: View,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct PromoteMessageResp {
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PromoteAckMessage {
     pub node_id: NodeId,
+    pub step: Step,
     pub message_id: MessageId,
     pub share_sign: SignatureShare,
 }

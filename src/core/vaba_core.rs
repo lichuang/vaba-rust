@@ -5,9 +5,8 @@ use std::sync::Arc;
 use log::error;
 use log::info;
 use reqwest::Client;
-use serde::Serialize;
-use serde::Serializer;
 use threshold_crypto::Signature;
+use threshold_crypto::SignatureShare;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
@@ -15,8 +14,8 @@ use crate::base::ClusterConfig;
 use crate::base::Message;
 use crate::base::MessageId;
 use crate::base::NodeId;
+use crate::base::PromoteAckMessage;
 use crate::base::PromoteMessage;
-use crate::base::PromoteMessageResp;
 use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
 use crate::base::Step;
@@ -34,6 +33,7 @@ use super::PromoteValue;
 use super::PromoteValueWithProof;
 use super::Proof;
 use super::ProofValue;
+use super::WaitPromoteAck;
 
 struct KeyState {
     pub proof: Signature,
@@ -64,7 +64,7 @@ enum PromoteState {
     Promote(PromoteData),
 
     // step and step's PromoteData
-    WaitPromoteResponse((Step, PromoteData)),
+    WaitPromoteAck(WaitPromoteAck),
 }
 
 struct DeliverValue {
@@ -77,6 +77,8 @@ pub struct VabaCore {
     node_id: NodeId,
 
     id: ID,
+
+    threshold: usize,
 
     state: VabaState,
 
@@ -123,10 +125,12 @@ impl VabaCore {
         cluster: ClusterConfig,
     ) -> Self {
         let total = cluster.nodes.len();
+        // threshold = 2 * f + 1, f = number of faulty nodes
         let threshold = 2 * (total as f32 / 3 as f32) as usize + 1;
         let core = Self {
             node_id,
             id: format!("node_{}", node_id),
+            threshold,
             state: VabaState::default(),
             promote_state: PromoteState::Init,
             rx_api,
@@ -175,6 +179,9 @@ impl VabaCore {
         match msg {
             Message::Proposal(proposal) => self.handle_proposal_message(proposal).await?,
             Message::Promote(promote) => self.handle_promote_message(promote).await?,
+            Message::PromoteAck(promote_ack) => {
+                self.handle_promote_ack_message(promote_ack).await?
+            }
         }
         Ok(())
     }
@@ -222,20 +229,17 @@ impl VabaCore {
             .share_sign(self.node_id, &value_string)?;
 
         // deliver promote value
-        self.deliver(&promote);
+        self.deliver(&promote).await;
 
-        let share_sign = self
-            .threshold_signature
-            .share_sign(self.node_id, &promote.value.value)?;
-
-        let resp = PromoteMessageResp {
+        let resp = PromoteAckMessage {
             node_id: self.node_id,
             message_id: promote.value.message_id,
+            step: promote.step,
             share_sign,
         };
         let json = serde_json::to_string(&resp)?;
 
-        let uri = format!("http://{}/promote", address);
+        let uri = format!("http://{}/promote_respp", address);
         let resp = self
             .http_client
             .post(uri)
@@ -251,6 +255,54 @@ impl VabaCore {
         }
 
         self.metrics.incr_send_promote_resp();
+
+        Ok(())
+    }
+
+    async fn handle_promote_ack_message(&mut self, resp: PromoteAckMessage) -> Result<()> {
+        let wait_promote_resp = if let PromoteState::WaitPromoteAck(wait) = &mut self.promote_state
+        {
+            wait
+        } else {
+            error!(
+                "recv promote resp message {} from {} but not in WaitPromoteAck state",
+                resp.message_id, resp.node_id
+            );
+            return Ok(());
+        };
+
+        if wait_promote_resp.step != resp.step {
+            error!(
+                "recv promote resp message {} from {} but not the same step, expected {}, actual {}",
+                resp.message_id, resp.node_id, wait_promote_resp.step, resp.step,
+            );
+            return Ok(());
+        }
+
+        if wait_promote_resp.data.value.message_id != resp.message_id {
+            error!(
+                "recv promote resp message {} from {} but not the same message, expected message id {}",
+                resp.message_id, resp.node_id, wait_promote_resp.data.value.message_id,
+            );
+            return Ok(());
+        }
+
+        wait_promote_resp
+            .share_signs
+            .insert(resp.node_id, resp.share_sign);
+
+        // if not reach 2f+1 aggrement, just return
+        if wait_promote_resp.share_signs.len() < self.threshold {
+            return Ok(());
+        }
+
+        // now step has reach aggrement, move to the next step(step < 4) or leader election phase(step == 4)
+        let share_signs: Vec<(NodeId, SignatureShare)> =
+            wait_promote_resp.share_signs.clone().into_iter().collect();
+        let signature = self.threshold_signature.threshold_sign(&share_signs)?;
+        if resp.step == 4 {
+        } else {
+        }
 
         Ok(())
     }
@@ -364,10 +416,10 @@ impl VabaCore {
                     }
                 }
                 PromoteState::Promote(data) => {
-                    self.promote_data(1, data.clone()).await?;
+                    self.promote(1, data.clone()).await?;
                     break;
                 }
-                _ => {}
+                _ => break,
             }
         }
         Ok(())
@@ -414,14 +466,32 @@ impl VabaCore {
         }
     }
 
-    async fn promote_data(&mut self, step: Step, promote_data: PromoteData) -> Result<()> {
-        self.promote_state = PromoteState::WaitPromoteResponse((step, promote_data.clone()));
+    async fn promote(&mut self, step: Step, promote: PromoteData) -> Result<()> {
+        let mut promote_resp = WaitPromoteAck {
+            step,
+            data: promote.clone(),
+            share_signs: BTreeMap::new(),
+        };
+        // calculate share sign of this node
+        let proof_value = ProofValue {
+            id: self.node_id,
+            // use last step signature as in proof
+            step: step - 1,
+            value: promote.value.clone(),
+        };
+        let value_string = serde_json::to_string(&proof_value)?;
+        let share_sign = self
+            .threshold_signature
+            .share_sign(self.node_id, &value_string)?;
+        promote_resp.share_signs.insert(self.node_id, share_sign);
+
+        self.promote_state = PromoteState::WaitPromoteAck(promote_resp);
         let message = PromoteMessage {
             step,
             node_id: self.node_id,
-            value: promote_data.value.clone(),
-            view: promote_data.view,
-            proof: promote_data.proof.clone(),
+            value: promote.value.clone(),
+            view: promote.view,
+            proof: promote.proof.clone(),
         };
         let json = serde_json::to_string(&message)?;
         for (node_id, address) in &self.cluster.nodes {

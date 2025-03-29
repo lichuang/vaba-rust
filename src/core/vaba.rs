@@ -1,25 +1,13 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
-
-use actix_web::post;
-use actix_web::web;
-use actix_web::web::Data;
-use actix_web::web::Json;
-use actix_web::Responder;
 
 use actix_web::middleware;
 use actix_web::middleware::Logger;
 use actix_web::HttpServer;
 
-use crate::base::ClientProposalMessage;
 use crate::base::ClusterConfig;
 use crate::base::Message;
-use crate::base::MessageId;
 use crate::base::NodeId;
-use crate::base::ProposalMessage;
-use crate::base::ProposalMessageResp;
-use crate::base::Value;
 use anyhow::Error;
 use tokio::spawn;
 use tokio::sync::mpsc::unbounded_channel;
@@ -70,6 +58,7 @@ impl Vaba {
                 .service(handlers::proposal)
                 // node internal RPC
                 .service(handlers::promote)
+                .service(handlers::promote_ack)
         });
 
         let node_id = node_id;

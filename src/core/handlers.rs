@@ -3,7 +3,10 @@ use log::{error, info};
 use tokio::sync::oneshot;
 
 use crate::{
-    base::{ClientProposalMessage, Message, PromoteMessage, ProposalMessage, ProposalMessageResp},
+    base::{
+        ClientProposalMessage, Message, PromoteAckMessage, PromoteMessage, ProposalMessage,
+        ProposalMessageResp,
+    },
     core::vaba::Vaba,
 };
 
@@ -62,6 +65,27 @@ pub async fn promote(req: Json<PromoteMessage>) -> actix_web::Result<impl Respon
     if let Err(e) = send_res {
         error!(
             "send to node {} core promote message {} error {:?}",
+            app.node_id, message_id, e
+        );
+    }
+
+    Ok(Json(()))
+}
+
+#[post("/promote-ack")]
+pub async fn promote_ack(req: Json<PromoteAckMessage>) -> actix_web::Result<impl Responder> {
+    let app = Vaba::get_instance();
+    let message = req.into_inner();
+
+    info!(
+        "node {} recv promote resp message: {:?}",
+        app.node_id, message
+    );
+    let message_id = message.message_id;
+    let send_res = app.tx_api.send(Message::PromoteAck(message));
+    if let Err(e) = send_res {
+        error!(
+            "send to node {} core promote resp message {} error {:?}",
             app.node_id, message_id, e
         );
     }

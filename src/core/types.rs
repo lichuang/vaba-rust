@@ -1,4 +1,6 @@
-use threshold_crypto::Signature;
+use std::collections::BTreeMap;
+
+use threshold_crypto::{Signature, SignatureShare};
 
 use crate::base::{MessageId, NodeId, Step, Value, View};
 
@@ -41,4 +43,14 @@ pub struct ProofValue {
     pub id: NodeId,
     pub step: Step,
     pub value: PromoteValue,
+}
+
+pub struct WaitPromoteAck {
+    // promote step
+    pub step: Step,
+
+    pub data: PromoteData,
+
+    // share sign return by the other nodes
+    pub share_signs: BTreeMap<NodeId, SignatureShare>,
 }
