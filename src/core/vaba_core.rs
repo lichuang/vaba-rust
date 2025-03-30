@@ -187,6 +187,7 @@ impl VabaCore {
         let faulty = (total as f32 / 3 as f32) as usize;
         // threshold = 2 * f + 1, f = number of faulty nodes
         let threshold = 2 * faulty + 1;
+        let node_ids: Vec<u64> = nodes.keys().cloned().collect();
         let core = Self {
             node_id,
             id: format!("node_{}", node_id),
@@ -214,8 +215,8 @@ impl VabaCore {
             skip_share_signs: BTreeMap::new(),
             stop: false,
             decide_values: Vec::new(),
-            threshold_signature: ThresholdSignatureScheme::new(threshold, total),
-            threshold_coin_tossing: ThresholdCoinTossing::new(threshold, total),
+            threshold_signature: ThresholdSignatureScheme::new(threshold, &node_ids),
+            threshold_coin_tossing: ThresholdCoinTossing::new(threshold, &node_ids),
         };
 
         core
