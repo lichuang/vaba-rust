@@ -19,6 +19,7 @@ use crate::base::NodeId;
 use crate::base::PromoteMessage;
 use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
+use crate::base::ShareMessage;
 use crate::base::SkipMessage;
 use crate::base::SkipShareMessage;
 use crate::base::Step;
@@ -82,6 +83,9 @@ enum PromoteState {
 
     // election leader
     ElectionLeader(BTreeMap<NodeId, SignatureShare>),
+
+    // view change
+    ViewChange(NodeId),
 }
 
 struct DeliverValue {
@@ -325,7 +329,7 @@ impl VabaCore {
                 let node_share_sign = (skip_share.node_id, skip_share.share_proof);
                 self.skip_share_signs
                     .entry(skip_share.view)
-                    .and_modify(|f| f.push((node_share_sign.clone())))
+                    .and_modify(|f| f.push(node_share_sign.clone()))
                     .or_insert(vec![node_share_sign]);
 
                 let node_share_signs = self.skip_share_signs.get(&skip_share.view).unwrap();
@@ -356,6 +360,8 @@ impl VabaCore {
                 // stop receiving promote message
                 self.stop = true;
                 // change to `ElectionLeader` state
+                self.send_share_message(skip_share.node_id, skip_share.view, skip_share.message_id)
+                    .await?;
                 self.promote_state = PromoteState::ElectionLeader(BTreeMap::new());
             }
             Message::Skip(skip) => {
@@ -374,27 +380,92 @@ impl VabaCore {
                 }
                 // mark skip[view] is true
                 self.skip.insert(view);
-                if self.send_skip.contains(&view) {
-                    return Ok(());
-                }
-                self.send_skip.insert(view);
 
-                // send `SKIP` message to all parties
-                let skip_message = SkipMessage {
-                    node_id: skip.node_id,
-                    view: skip.view,
-                    proof: skip.proof.clone(),
-                    message_id: skip.message_id,
-                };
-                let msg_str = serde_json::to_string(&skip_message)?;
-                for (node_id, address) in &self.cluster.nodes {
-                    if *node_id == self.node_id {
-                        continue;
+                if !self.send_skip.contains(&view) {
+                    self.send_skip.insert(view);
+                    // send `SKIP` message to all parties
+                    let skip_message = SkipMessage {
+                        node_id: skip.node_id,
+                        view: skip.view,
+                        proof: skip.proof.clone(),
+                        message_id: skip.message_id,
+                    };
+                    let msg_str = serde_json::to_string(&skip_message)?;
+                    for (node_id, address) in &self.cluster.nodes {
+                        if *node_id == self.node_id {
+                            continue;
+                        }
+
+                        self.send("skip", &msg_str, node_id, address).await?;
+                    }
+                }
+
+                // change to `ElectionLeader` state
+                self.send_share_message(skip.node_id, skip.view, skip.message_id)
+                    .await?;
+                self.promote_state = PromoteState::ElectionLeader(BTreeMap::new());
+            }
+            Message::Share(share) => {
+                if let PromoteState::ElectionLeader(coin_share_set) = &mut self.promote_state {
+                    let coin_tossing = &self.threshold_coin_tossing;
+                    let coin_share = ProofCoinShare {
+                        node_id: share.node_id,
+                        view: share.view,
+                    };
+                    let msg = serde_json::to_string(&coin_share)?;
+                    if !coin_tossing.coin_share_validate(self.node_id, &msg, &share.proof) {
+                        error!(
+                            "recv share msg {} from node {} validate fail",
+                            share.message_id, share.node_id
+                        );
+
+                        return Ok(());
                     }
 
-                    self.send("skip", &msg_str, node_id, address).await?;
+                    coin_share_set.insert(share.node_id, share.proof);
+                    if coin_share_set.len() < self.faulty + 1 {
+                        return Ok(());
+                    }
+                    let share_signs: Vec<(NodeId, SignatureShare)> =
+                        coin_share_set.clone().into_iter().collect();
+                    let leader_id = coin_tossing.coin_toss(&msg, &share_signs)?;
+                    // change state to VIEW-CHANGE
+                    self.promote_state = PromoteState::ViewChange(leader_id);
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn handle_share_message(&self, skip: &SkipMessage) -> Result<()> {
+        Ok(())
+    }
+
+    async fn send_share_message(
+        &self,
+        node_id: NodeId,
+        view: View,
+        message_id: MessageId,
+    ) -> Result<()> {
+        let coin_tossing = &self.threshold_coin_tossing;
+        let coin_share = ProofCoinShare { node_id, view };
+        let msg = serde_json::to_string(&coin_share)?;
+        let coin_share = coin_tossing.coin_share(self.node_id, &msg)?;
+
+        let msg = ShareMessage {
+            node_id,
+            view,
+            proof: coin_share,
+            message_id,
+        };
+        let json = serde_json::to_string(&msg)?;
+
+        for (node_id, address) in &self.cluster.nodes {
+            if *node_id == self.node_id {
+                continue;
+            }
+
+            self.send("share", &json, node_id, address).await?;
         }
         Ok(())
     }
@@ -585,19 +656,6 @@ impl VabaCore {
         )
     }
 
-    //
-    fn elect(&self, view: &View) -> Result<()> {
-        let coin_tossing = &self.threshold_coin_tossing;
-        let coin_share = ProofCoinShare {
-            id: self.node_id,
-            view: *view,
-        };
-        let msg = serde_json::to_string(&coin_share)?;
-        let coin_share = coin_tossing.coin_share(self.node_id, &msg)?;
-
-        Ok(())
-    }
-
     fn external_vbba_validate(&self, _promote: &PromoteMessage) -> bool {
         // for now external proof always validate true
         true
@@ -737,6 +795,9 @@ impl VabaCore {
                 }
                 PromoteState::Done((view, value, signature)) => {
                     self.promote_state = self.done(view, value, signature).await?;
+                    break;
+                }
+                PromoteState::ElectionLeader(coin_share_set) => {
                     break;
                 }
                 _ => break,

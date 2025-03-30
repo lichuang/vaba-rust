@@ -1,7 +1,10 @@
 use threshold_crypto::{Signature, SignatureShare};
 use tokio::sync::oneshot;
 
-use crate::core::{PromoteValue, Proof};
+use crate::{
+    core::{PromoteValue, Proof},
+    crypto::CoinShare,
+};
 
 use super::{MessageId, NodeId, Step, Value, View};
 
@@ -18,6 +21,8 @@ pub enum Message {
     SkipShare(SkipShareMessage),
 
     Skip(SkipMessage),
+
+    Share(ShareMessage),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -90,4 +95,15 @@ pub struct SkipMessage {
     pub message_id: MessageId,
 
     pub proof: Signature,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ShareMessage {
+    pub node_id: NodeId,
+
+    pub view: View,
+
+    pub message_id: MessageId,
+
+    pub proof: CoinShare,
 }

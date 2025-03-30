@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 use crate::{
     base::{
         AckMessage, ClientProposalMessage, DoneMessage, Message, PromoteMessage, ProposalMessage,
-        ProposalMessageResp, SkipMessage, SkipShareMessage,
+        ProposalMessageResp, ShareMessage, SkipMessage, SkipShareMessage,
     },
     core::vaba::Vaba,
 };
@@ -152,6 +152,27 @@ pub async fn skip(req: Json<SkipMessage>) -> actix_web::Result<impl Responder> {
     if let Err(e) = send_res {
         error!(
             "send to node {} core skip message {} error {:?}",
+            app.node_id, message_id, e
+        );
+    }
+
+    Ok(Json(()))
+}
+
+#[post("/share")]
+pub async fn share(req: Json<ShareMessage>) -> actix_web::Result<impl Responder> {
+    let app = Vaba::get_instance();
+    let message = req.into_inner();
+
+    info!(
+        "node {} recv share message: {:?} from {}",
+        app.node_id, message.message_id, message.node_id
+    );
+    let message_id = message.message_id;
+    let send_res = app.tx_api.send(Message::Share(message));
+    if let Err(e) = send_res {
+        error!(
+            "send to node {} core share message {} error {:?}",
             app.node_id, message_id, e
         );
     }
