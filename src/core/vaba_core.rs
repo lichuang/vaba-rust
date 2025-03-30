@@ -10,15 +10,16 @@ use threshold_crypto::SignatureShare;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
+use crate::base::AckMessage;
 use crate::base::ClusterConfig;
 use crate::base::DoneMessage;
 use crate::base::Message;
 use crate::base::MessageId;
 use crate::base::NodeId;
-use crate::base::PromoteAckMessage;
 use crate::base::PromoteMessage;
 use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
+use crate::base::SkipShareMessage;
 use crate::base::Step;
 use crate::base::Value;
 use crate::base::View;
@@ -28,13 +29,15 @@ use anyhow::Result;
 use futures::FutureExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::MessageHash;
 use super::Metrics;
 use super::PromoteData;
 use super::PromoteValue;
 use super::PromoteValueWithProof;
 use super::Proof;
+use super::ProofSkipShare;
 use super::ProofValue;
-use super::WaitPromoteAck;
+use super::WaitAck;
 use super::WaitSkipAck;
 
 struct KeyState {
@@ -67,7 +70,7 @@ enum PromoteState {
     Promote(PromoteData),
 
     // wait promote with 2f + 1 ack return
-    WaitPromoteAck(WaitPromoteAck),
+    WaitAck(WaitAck),
 
     // promote success, notify all parties DONE
     Done((View, PromoteValue, Signature)),
@@ -114,6 +117,21 @@ pub struct VabaCore {
 
     skip: BTreeSet<View>,
 
+    // number of view send `DONE` message
+    broadcast_done: BTreeMap<View, u16>,
+
+    // number of view has recv validate `SKIP-SHARE` message
+    broadcast_skip: BTreeMap<View, u16>,
+
+    // if recv `DONE` message id  in view from node id
+    recv_done: BTreeSet<MessageHash>,
+
+    // if send `SKIP-SHARE` message in view
+    send_skip_share: BTreeSet<View>,
+
+    // view share signs vector
+    skip_share_signs: BTreeMap<View, Vec<(NodeId, SignatureShare)>>,
+
     threshold_signature: ThresholdSignatureScheme,
 }
 
@@ -153,6 +171,11 @@ impl VabaCore {
             metrics: Metrics::new(),
             deliver: Arc::new(Mutex::new(BTreeMap::new())),
             skip: BTreeSet::new(),
+            broadcast_done: BTreeMap::new(),
+            broadcast_skip: BTreeMap::new(),
+            send_skip_share: BTreeSet::new(),
+            recv_done: BTreeSet::new(),
+            skip_share_signs: BTreeMap::new(),
             threshold_signature: ThresholdSignatureScheme::new(threshold, total),
         };
 
@@ -190,14 +213,77 @@ impl VabaCore {
         match msg {
             Message::Proposal(proposal) => self.handle_proposal_message(proposal).await?,
             Message::Promote(promote) => self.handle_promote_message(promote).await?,
-            Message::PromoteAck(promote_ack) => {
-                self.handle_promote_ack_message(promote_ack).await?
+            Message::Ack(ack) => self.handle_ack_message(ack).await?,
+            Message::Done(done) => {
+                let msg_hash = MessageHash {
+                    node_id: done.node_id,
+                    view: done.view,
+                    message_id: done.value.message_id,
+                };
+                // first check if recv this DONE message before
+                if self.recv_done.contains(&msg_hash) {
+                    return Ok(());
+                }
+                self.recv_done.insert(msg_hash);
+                // validate the message
+                let validate = self.handle_done_message(&done).await?;
+                if !validate {
+                    error!(
+                        "recv done msg {} from node {} validate fail",
+                        done.value.message_id, done.node_id
+                    );
+                    return Ok(());
+                }
+
+                self.broadcast_done
+                    .entry(done.view)
+                    .and_modify(|done| *done += 1)
+                    .or_insert(1);
+
+                // check if has reach 2f+1 validate
+                if self.threshold > *self.broadcast_done.get(&done.view).unwrap() as usize {
+                    return Ok(());
+                }
+                // check if this view skip-share message has been send before
+                if self.send_skip_share.contains(&done.view) {
+                    return Ok(());
+                }
+
+                self.send_skip_share.insert(done.view);
+                let proof_skip = ProofSkipShare {
+                    id: done.node_id,
+                    view: done.view,
+                };
+                let value_string = serde_json::to_string(&proof_skip)?;
+                let share_sign = self
+                    .threshold_signature
+                    .share_sign(self.node_id, &value_string)?;
+
+                let signs = vec![(self.node_id, share_sign.clone())];
+                self.skip_share_signs.insert(done.view, signs);
+
+                let skip_share_msg = SkipShareMessage {
+                    node_id: self.node_id,
+                    view: done.view,
+                    share_proof: share_sign,
+                    message_id: done.value.message_id,
+                };
+                let json = serde_json::to_string(&skip_share_msg)?;
+
+                // send skip-share message to all parties
+                for (node_id, address) in &self.cluster.nodes {
+                    if *node_id == self.node_id {
+                        continue;
+                    }
+                    self.send("skip-share", &json, node_id, address).await?;
+                }
             }
+            Message::SkipShare(skip_share) => {}
         }
         Ok(())
     }
 
-    async fn handle_proposal_message(&mut self, message: ProposalMessage) -> Result<()> {
+    async fn handle_proposal_message(&self, message: ProposalMessage) -> Result<()> {
         self.metrics.incr_recv_proposal();
         {
             let mut proposal_values = self.proposal_values.lock().await;
@@ -244,7 +330,7 @@ impl VabaCore {
         // deliver promote value
         self.deliver(&promote).await;
 
-        let resp = PromoteAckMessage {
+        let resp = AckMessage {
             node_id: self.node_id,
             message_id: promote.value.message_id,
             step: promote.step,
@@ -272,12 +358,12 @@ impl VabaCore {
         Ok(())
     }
 
-    async fn handle_promote_ack_message(&mut self, resp: PromoteAckMessage) -> Result<()> {
-        let wait_promote_ack = if let PromoteState::WaitPromoteAck(wait) = &mut self.promote_state {
+    async fn handle_ack_message(&mut self, resp: AckMessage) -> Result<()> {
+        let wait_promote_ack = if let PromoteState::WaitAck(wait) = &mut self.promote_state {
             wait
         } else {
             error!(
-                "recv promote resp message {} from {} but not in WaitPromoteAck state",
+                "recv promote resp message {} from {} but not in WaitAck state",
                 resp.message_id, resp.node_id
             );
             return Ok(());
@@ -334,6 +420,21 @@ impl VabaCore {
         }
 
         Ok(())
+    }
+
+    // return false if validate message fail
+    async fn handle_done_message(&self, done: &DoneMessage) -> Result<bool> {
+        let proof_value = ProofValue {
+            id: done.node_id,
+            step: 4,
+            value: done.value.clone(),
+        };
+        let value_string = serde_json::to_string(&proof_value)?;
+        let validate = self
+            .threshold_signature
+            .threshold_validate(&value_string, &done.proof);
+
+        Ok(validate)
     }
 
     fn external_vbba_validate(&self, _promote: &PromoteMessage) -> bool {
@@ -583,7 +684,7 @@ impl VabaCore {
     }
 
     async fn promote(&self, step: Step, promote: PromoteData) -> Result<PromoteState> {
-        let mut promote_resp = WaitPromoteAck {
+        let mut promote_resp = WaitAck {
             step,
             data: promote.clone(),
             share_signs: BTreeMap::new(),
@@ -617,8 +718,8 @@ impl VabaCore {
 
             self.metrics.incr_send_promote();
         }
-        //self.promote_state = PromoteState::WaitPromoteAck(promote_resp);
-        Ok(PromoteState::WaitPromoteAck(promote_resp))
+        //self.promote_state = PromoteState::WaitAck(promote_resp);
+        Ok(PromoteState::WaitAck(promote_resp))
     }
 }
 

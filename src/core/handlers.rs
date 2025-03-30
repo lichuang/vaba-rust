@@ -4,8 +4,8 @@ use tokio::sync::oneshot;
 
 use crate::{
     base::{
-        ClientProposalMessage, Message, PromoteAckMessage, PromoteMessage, ProposalMessage,
-        ProposalMessageResp,
+        AckMessage, ClientProposalMessage, DoneMessage, Message, PromoteMessage, ProposalMessage,
+        ProposalMessageResp, SkipShareMessage,
     },
     core::vaba::Vaba,
 };
@@ -72,20 +72,56 @@ pub async fn promote(req: Json<PromoteMessage>) -> actix_web::Result<impl Respon
     Ok(Json(()))
 }
 
-#[post("/promote-ack")]
-pub async fn promote_ack(req: Json<PromoteAckMessage>) -> actix_web::Result<impl Responder> {
+#[post("/ack")]
+pub async fn ack(req: Json<AckMessage>) -> actix_web::Result<impl Responder> {
+    let app = Vaba::get_instance();
+    let message = req.into_inner();
+
+    info!("node {} recv ack message: {:?}", app.node_id, message);
+    let message_id = message.message_id;
+    let send_res = app.tx_api.send(Message::Ack(message));
+    if let Err(e) = send_res {
+        error!(
+            "send to node {} core ack message {} error {:?}",
+            app.node_id, message_id, e
+        );
+    }
+
+    Ok(Json(()))
+}
+
+#[post("/done")]
+pub async fn done(req: Json<DoneMessage>) -> actix_web::Result<impl Responder> {
+    let app = Vaba::get_instance();
+    let message = req.into_inner();
+
+    info!("node {} recv done message: {:?}", app.node_id, message);
+    let message_id = message.value.message_id;
+    let send_res = app.tx_api.send(Message::Done(message));
+    if let Err(e) = send_res {
+        error!(
+            "send to node {} core done message {} error {:?}",
+            app.node_id, message_id, e
+        );
+    }
+
+    Ok(Json(()))
+}
+
+#[post("/skip-share")]
+pub async fn skip_share(req: Json<SkipShareMessage>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
 
     info!(
-        "node {} recv promote resp message: {:?}",
+        "node {} recv skip share message: {:?}",
         app.node_id, message
     );
     let message_id = message.message_id;
-    let send_res = app.tx_api.send(Message::PromoteAck(message));
+    let send_res = app.tx_api.send(Message::SkipShare(message));
     if let Err(e) = send_res {
         error!(
-            "send to node {} core promote resp message {} error {:?}",
+            "send to node {} core skip share message {} error {:?}",
             app.node_id, message_id, e
         );
     }

@@ -11,7 +11,11 @@ pub enum Message {
 
     Promote(PromoteMessage),
 
-    PromoteAck(PromoteAckMessage),
+    Ack(AckMessage),
+
+    Done(DoneMessage),
+
+    SkipShare(SkipShareMessage),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -46,7 +50,7 @@ pub struct PromoteMessage {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct PromoteAckMessage {
+pub struct AckMessage {
     pub node_id: NodeId,
     pub step: Step,
     pub message_id: MessageId,
@@ -60,6 +64,17 @@ pub struct DoneMessage {
     pub value: PromoteValue,
 
     pub proof: Signature,
+
+    pub view: View,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SkipShareMessage {
+    pub node_id: NodeId,
+
+    pub message_id: MessageId,
+
+    pub share_proof: SignatureShare,
 
     pub view: View,
 }

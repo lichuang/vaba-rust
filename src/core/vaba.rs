@@ -58,7 +58,9 @@ impl Vaba {
                 .service(handlers::proposal)
                 // node internal RPC
                 .service(handlers::promote)
-                .service(handlers::promote_ack)
+                .service(handlers::ack)
+                .service(handlers::done)
+                .service(handlers::skip_share)
         });
 
         let node_id = node_id;

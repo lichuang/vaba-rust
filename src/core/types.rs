@@ -45,7 +45,7 @@ pub struct ProofValue {
     pub value: PromoteValue,
 }
 
-pub struct WaitPromoteAck {
+pub struct WaitAck {
     // promote step
     pub step: Step,
 
@@ -62,4 +62,17 @@ pub struct WaitSkipAck {
 
     // share sign return by the other nodes
     pub share_signs: BTreeMap<NodeId, SignatureShare>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ProofSkipShare {
+    pub id: NodeId,
+    pub view: View,
+}
+
+#[derive(Clone, Eq, PartialOrd, Ord, PartialEq)]
+pub struct MessageHash {
+    pub node_id: NodeId,
+    pub view: View,
+    pub message_id: MessageId,
 }
