@@ -23,6 +23,8 @@ pub enum Message {
     Skip(SkipMessage),
 
     Share(ShareMessage),
+
+    ViewChangeMessage(ViewChangeMessage),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -37,7 +39,7 @@ pub struct ProposalMessage {
     pub message_id: MessageId,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProposalMessageResp {
     pub ok: bool,
     pub error: Option<String>,
@@ -111,8 +113,11 @@ pub struct ShareMessage {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ViewChangeMessage {
     pub node_id: NodeId,
+    pub leader_id: NodeId,
 
     pub view: View,
+
+    pub message_id: MessageId,
 
     pub key: Option<PromoteValueWithProof>,
 

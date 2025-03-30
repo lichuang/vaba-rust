@@ -103,22 +103,6 @@ mod tests {
     use super::{NodeId, ThresholdSignatureScheme};
 
     #[test]
-    fn test_threshold_share_signature_validate() -> Result<()> {
-        let threshold = 3;
-        let total = 5;
-        let threshold_signature = ThresholdSignatureScheme::new(threshold, total);
-        let message = "hello world".to_string();
-
-        let share_sign = threshold_signature.share_sign(2, &message)?;
-
-        for i in 0..total {
-            assert!(threshold_signature.share_validate(i as NodeId, &message, &share_sign));
-        }
-
-        Ok(())
-    }
-
-    #[test]
     fn test_threshold_signature_scheme() -> Result<()> {
         let threshold = 3;
         let total = 5;

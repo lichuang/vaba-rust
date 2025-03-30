@@ -17,7 +17,6 @@ use crate::base::Message;
 use crate::base::MessageId;
 use crate::base::NodeId;
 use crate::base::PromoteMessage;
-use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
 use crate::base::ShareMessage;
 use crate::base::SkipMessage;
@@ -77,7 +76,7 @@ enum PromoteState {
     WaitAck(WaitAck),
 
     // promote success, notify all parties DONE
-    Done((View, PromoteValue, Signature)),
+    Done(View, PromoteValue, Signature),
 
     // wait until skip[view] is true
     WaitSkip(View),
@@ -85,8 +84,11 @@ enum PromoteState {
     // election leader
     ElectionLeader(BTreeMap<NodeId, SignatureShare>),
 
-    // view change
-    ViewChange((View, NodeId)),
+    // send view change
+    ViewChange(MessageId, View, NodeId),
+
+    // wait view change
+    WaitViewChange(MessageId, View, BTreeSet<NodeId>),
 }
 
 struct DeliverValue {
@@ -118,7 +120,8 @@ pub struct VabaCore {
 
     proposal_values: Arc<Mutex<Vec<(MessageId, Value)>>>,
 
-    proposal_sender: Arc<Mutex<BTreeMap<MessageId, oneshot::Sender<ProposalMessageResp>>>>,
+    //proposal_sender: Arc<Mutex<BTreeMap<MessageId, oneshot::Sender<ProposalMessageResp>>>>,
+    proposal_sender: BTreeMap<MessageId, oneshot::Sender<ProposalMessageResp>>,
 
     // save all the message ids have seen
     seen: BTreeSet<MessageId>,
@@ -154,6 +157,9 @@ pub struct VabaCore {
 
     // true if stop receiving promote value in current view
     stop: bool,
+
+    // decide values
+    decide_values: Vec<PromoteValue>,
 
     threshold_signature: ThresholdSignatureScheme,
     threshold_coin_tossing: ThresholdCoinTossing,
@@ -192,7 +198,8 @@ impl VabaCore {
             http_client: Client::new(),
             cluster,
             proposal_values: Arc::new(Mutex::new(Vec::new())),
-            proposal_sender: Arc::new(Mutex::new(BTreeMap::new())),
+            //proposal_sender: Arc::new(Mutex::new(BTreeMap::new())),
+            proposal_sender: BTreeMap::new(),
             seen: BTreeSet::new(),
             metrics: Metrics::new(),
             deliver: Arc::new(Mutex::new(BTreeMap::new())),
@@ -205,6 +212,7 @@ impl VabaCore {
             recv_skip_share: BTreeSet::new(),
             skip_share_signs: BTreeMap::new(),
             stop: false,
+            decide_values: Vec::new(),
             threshold_signature: ThresholdSignatureScheme::new(threshold, total),
             threshold_coin_tossing: ThresholdCoinTossing::new(threshold, total),
         };
@@ -241,7 +249,17 @@ impl VabaCore {
 
     async fn handle_message(&mut self, msg: Message) -> Result<()> {
         match msg {
-            Message::Proposal(proposal) => self.handle_proposal_message(proposal).await?,
+            Message::Proposal(proposal) => {
+                self.metrics.incr_recv_proposal();
+                {
+                    let mut proposal_values = self.proposal_values.lock().await;
+                    proposal_values.push((proposal.message_id, proposal.value.clone()));
+                }
+                {
+                    self.proposal_sender
+                        .insert(proposal.message_id, proposal.sender);
+                }
+            }
             Message::Promote(promote) => self.handle_promote_message(promote).await?,
             Message::Ack(ack) => self.handle_ack_message(ack).await?,
             Message::Done(done) => {
@@ -431,14 +449,56 @@ impl VabaCore {
                         coin_share_set.clone().into_iter().collect();
                     let leader_id = coin_tossing.coin_toss(&msg, &share_signs)?;
                     // change state to VIEW-CHANGE
-                    self.promote_state = PromoteState::ViewChange((share.view, leader_id));
+                    self.promote_state =
+                        PromoteState::ViewChange(share.message_id, share.view, leader_id);
+                }
+            }
+            Message::ViewChangeMessage(view_change) => {
+                let leader_id = view_change.leader_id;
+                let lock = &view_change.lock;
+                let key = &view_change.key;
+                let commit = &view_change.commit;
+                let threshold_signature = &self.threshold_signature;
+
+                // validate commit value
+                if let Some(commit) = commit {
+                    let proof = &commit.proof;
+                    let value = PromoteValue {
+                        value: commit.value.clone(),
+                        message_id: commit.message_id,
+                    };
+                    let proof_value = ProofValue {
+                        id: leader_id,
+                        step: 3,
+                        value: value.clone(),
+                    };
+                    let json = serde_json::to_string(&proof_value)?;
+                    if threshold_signature.threshold_validate(&json, proof) {
+                        // now the value is decided!!
+                        info!(
+                            "node {} decide value {:?} promoted by node {}",
+                            self.node_id, value, leader_id
+                        );
+                        self.decide_values.push(value);
+                        // response to the client
+                        if let Some(tx) = self.proposal_sender.remove(&commit.message_id) {
+                            let resp = ProposalMessageResp {
+                                ok: true,
+                                error: None,
+                            };
+                            if let Err(e) = tx.send(resp.clone()) {
+                                error!(
+                                    "resp proposal message {} to client error {:?}",
+                                    commit.message_id, e
+                                );
+                            }
+                        } else {
+                            error!("cannot find channel of message {}", commit.message_id);
+                        }
+                    }
                 }
             }
         }
-        Ok(())
-    }
-
-    fn handle_share_message(&self, skip: &SkipMessage) -> Result<()> {
         Ok(())
     }
 
@@ -481,19 +541,6 @@ impl VabaCore {
 
         let validate = threshold_signature.threshold_validate(&json, &skip.proof);
         Ok(validate)
-    }
-
-    async fn handle_proposal_message(&self, message: ProposalMessage) -> Result<()> {
-        self.metrics.incr_recv_proposal();
-        {
-            let mut proposal_values = self.proposal_values.lock().await;
-            proposal_values.push((message.message_id, message.value.clone()));
-        }
-        {
-            let mut proposal_sender = self.proposal_sender.lock().await;
-            proposal_sender.insert(message.message_id, message.sender);
-        }
-        Ok(())
     }
 
     async fn handle_promote_message(&mut self, promote: PromoteMessage) -> Result<()> {
@@ -608,11 +655,11 @@ impl VabaCore {
             wait_promote_ack.share_signs.clone().into_iter().collect();
         let signature = self.threshold_signature.threshold_sign(&share_signs)?;
         if resp.step == 4 {
-            self.promote_state = PromoteState::Done((
+            self.promote_state = PromoteState::Done(
                 wait_promote_ack.data.view,
                 wait_promote_ack.data.value.clone(),
                 signature,
-            ));
+            );
         } else {
             let data = PromoteData {
                 value: wait_promote_ack.data.value.clone(),
@@ -794,17 +841,24 @@ impl VabaCore {
                     self.promote_state = self.promote(1, data.clone()).await?;
                     break;
                 }
-                PromoteState::Done((view, value, signature)) => {
+                PromoteState::Done(view, value, signature) => {
                     self.promote_state = self.done(view, value, signature).await?;
                     break;
                 }
                 PromoteState::ElectionLeader(coin_share_set) => {
                     break;
                 }
-                PromoteState::ViewChange((view, leader_id)) => {
-                    let ok = self.send_view_change(*view, *leader_id).await?;
+                PromoteState::ViewChange(message_id, view, leader_id) => {
+                    let ok = self
+                        .send_view_change(*message_id, *view, *leader_id)
+                        .await?;
                     if !ok {
+                        // move to the next view
+                        self.state.current += 1;
+                        self.promote_state = PromoteState::Init;
                     } else {
+                        self.promote_state =
+                            PromoteState::WaitViewChange(*message_id, *view, BTreeSet::new());
                     }
                     break;
                 }
@@ -814,7 +868,12 @@ impl VabaCore {
         Ok(())
     }
 
-    async fn send_view_change(&self, view: View, leader_id: NodeId) -> Result<bool> {
+    async fn send_view_change(
+        &self,
+        message_id: MessageId,
+        view: View,
+        leader_id: NodeId,
+    ) -> Result<bool> {
         let msg = {
             let deliver = self.deliver.lock().await;
             let view_deliver = if let Some(view_deliver) = deliver.get(&leader_id) {
@@ -832,8 +891,10 @@ impl VabaCore {
             };
 
             ViewChangeMessage {
-                node_id: leader_id,
+                leader_id: leader_id,
+                node_id: self.node_id,
                 view,
+                message_id,
                 key: deliver.key.clone(),
                 lock: deliver.lock.clone(),
                 commit: deliver.commit.clone(),
