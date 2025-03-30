@@ -25,6 +25,7 @@ use crate::base::Step;
 use crate::base::Value;
 use crate::base::View;
 use crate::base::ID;
+use crate::crypto::ThresholdCoinTossing;
 use crate::crypto::ThresholdSignatureScheme;
 use anyhow::Result;
 use futures::FutureExt;
@@ -36,6 +37,7 @@ use super::PromoteData;
 use super::PromoteValue;
 use super::PromoteValueWithProof;
 use super::Proof;
+use super::ProofCoinShare;
 use super::ProofSkipShare;
 use super::ProofValue;
 use super::WaitAck;
@@ -149,6 +151,7 @@ pub struct VabaCore {
     stop: bool,
 
     threshold_signature: ThresholdSignatureScheme,
+    threshold_coin_tossing: ThresholdCoinTossing,
 }
 
 impl Default for VabaState {
@@ -198,6 +201,7 @@ impl VabaCore {
             skip_share_signs: BTreeMap::new(),
             stop: false,
             threshold_signature: ThresholdSignatureScheme::new(threshold, total),
+            threshold_coin_tossing: ThresholdCoinTossing::new(threshold, total),
         };
 
         core
@@ -352,10 +356,59 @@ impl VabaCore {
                 // stop receiving promote message
                 self.stop = true;
                 // change to `ElectionLeader` state
+                self.promote_state = PromoteState::ElectionLeader(BTreeMap::new());
             }
-            Message::Skip(skip) => {}
+            Message::Skip(skip) => {
+                let validate = self.handle_skip_message(&skip)?;
+                if !validate {
+                    error!(
+                        "recv skip msg {} from node {} validate fail",
+                        skip.message_id, skip.node_id
+                    );
+
+                    return Ok(());
+                }
+                let view = skip.view;
+                if self.skip.contains(&view) {
+                    return Ok(());
+                }
+                // mark skip[view] is true
+                self.skip.insert(view);
+                if self.send_skip.contains(&view) {
+                    return Ok(());
+                }
+                self.send_skip.insert(view);
+
+                // send `SKIP` message to all parties
+                let skip_message = SkipMessage {
+                    node_id: skip.node_id,
+                    view: skip.view,
+                    proof: skip.proof.clone(),
+                    message_id: skip.message_id,
+                };
+                let msg_str = serde_json::to_string(&skip_message)?;
+                for (node_id, address) in &self.cluster.nodes {
+                    if *node_id == self.node_id {
+                        continue;
+                    }
+
+                    self.send("skip", &msg_str, node_id, address).await?;
+                }
+            }
         }
         Ok(())
+    }
+
+    fn handle_skip_message(&self, skip: &SkipMessage) -> Result<bool> {
+        let threshold_signature = &self.threshold_signature;
+        let proof_skip = ProofSkipShare {
+            id: skip.node_id,
+            view: skip.view,
+        };
+        let json = serde_json::to_string(&proof_skip)?;
+
+        let validate = threshold_signature.threshold_validate(&json, &skip.proof);
+        Ok(validate)
     }
 
     async fn handle_proposal_message(&self, message: ProposalMessage) -> Result<()> {
@@ -530,6 +583,19 @@ impl VabaCore {
                 &skip_share.share_proof,
             ),
         )
+    }
+
+    //
+    fn elect(&self, view: &View) -> Result<()> {
+        let coin_tossing = &self.threshold_coin_tossing;
+        let coin_share = ProofCoinShare {
+            id: self.node_id,
+            view: *view,
+        };
+        let msg = serde_json::to_string(&coin_share)?;
+        let coin_share = coin_tossing.coin_share(self.node_id, &msg)?;
+
+        Ok(())
     }
 
     fn external_vbba_validate(&self, _promote: &PromoteMessage) -> bool {

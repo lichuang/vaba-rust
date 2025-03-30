@@ -61,6 +61,12 @@ pub struct ProofSkipShare {
     pub view: View,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ProofCoinShare {
+    pub id: NodeId,
+    pub view: View,
+}
+
 #[derive(Clone, Eq, PartialOrd, Ord, PartialEq)]
 pub struct MessageHash {
     pub node_id: NodeId,
