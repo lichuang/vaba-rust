@@ -1,4 +1,4 @@
-use threshold_crypto::SignatureShare;
+use threshold_crypto::{Signature, SignatureShare};
 use tokio::sync::oneshot;
 
 use crate::core::{PromoteValue, Proof};
@@ -51,4 +51,15 @@ pub struct PromoteAckMessage {
     pub step: Step,
     pub message_id: MessageId,
     pub share_sign: SignatureShare,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DoneMessage {
+    pub node_id: NodeId,
+
+    pub value: PromoteValue,
+
+    pub proof: Signature,
+
+    pub view: View,
 }
