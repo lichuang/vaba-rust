@@ -16,6 +16,8 @@ pub enum Message {
     Done(DoneMessage),
 
     SkipShare(SkipShareMessage),
+
+    Skip(SkipMessage),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -77,4 +79,15 @@ pub struct SkipShareMessage {
     pub share_proof: SignatureShare,
 
     pub view: View,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SkipMessage {
+    pub node_id: NodeId,
+
+    pub view: View,
+
+    pub message_id: MessageId,
+
+    pub proof: Signature,
 }

@@ -55,15 +55,6 @@ pub struct WaitAck {
     pub share_signs: BTreeMap<NodeId, SignatureShare>,
 }
 
-pub struct WaitSkipAck {
-    pub value: PromoteValue,
-
-    pub view: View,
-
-    // share sign return by the other nodes
-    pub share_signs: BTreeMap<NodeId, SignatureShare>,
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ProofSkipShare {
     pub id: NodeId,

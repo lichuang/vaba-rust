@@ -19,6 +19,7 @@ use crate::base::NodeId;
 use crate::base::PromoteMessage;
 use crate::base::ProposalMessage;
 use crate::base::ProposalMessageResp;
+use crate::base::SkipMessage;
 use crate::base::SkipShareMessage;
 use crate::base::Step;
 use crate::base::Value;
@@ -38,7 +39,6 @@ use super::Proof;
 use super::ProofSkipShare;
 use super::ProofValue;
 use super::WaitAck;
-use super::WaitSkipAck;
 
 struct KeyState {
     pub proof: Signature,
@@ -75,7 +75,11 @@ enum PromoteState {
     // promote success, notify all parties DONE
     Done((View, PromoteValue, Signature)),
 
-    WaitSkip(WaitSkipAck),
+    // wait until skip[view] is true
+    WaitSkip(View),
+
+    // election leader
+    ElectionLeader(BTreeMap<NodeId, SignatureShare>),
 }
 
 struct DeliverValue {
@@ -89,7 +93,9 @@ pub struct VabaCore {
 
     id: ID,
 
+    // threshold = 2 * faulty + 1
     threshold: usize,
+    faulty: usize,
 
     state: VabaState,
 
@@ -115,6 +121,7 @@ pub struct VabaCore {
     // node id -> {view, DeliverValue}
     deliver: Arc<Mutex<BTreeMap<NodeId, BTreeMap<View, DeliverValue>>>>,
 
+    // if has skip view
     skip: BTreeSet<View>,
 
     // number of view send `DONE` message
@@ -126,11 +133,20 @@ pub struct VabaCore {
     // if recv `DONE` message id  in view from node id
     recv_done: BTreeSet<MessageHash>,
 
+    // if recv `SKIP-SHARE` message id  in view from node id
+    recv_skip_share: BTreeSet<MessageHash>,
+
     // if send `SKIP-SHARE` message in view
     send_skip_share: BTreeSet<View>,
 
+    // if send `SKIP` message in view
+    send_skip: BTreeSet<View>,
+
     // view share signs vector
     skip_share_signs: BTreeMap<View, Vec<(NodeId, SignatureShare)>>,
+
+    // true if stop receiving promote value in current view
+    stop: bool,
 
     threshold_signature: ThresholdSignatureScheme,
 }
@@ -153,12 +169,14 @@ impl VabaCore {
         cluster: ClusterConfig,
     ) -> Self {
         let total = cluster.nodes.len();
+        let faulty = (total as f32 / 3 as f32) as usize;
         // threshold = 2 * f + 1, f = number of faulty nodes
-        let threshold = 2 * (total as f32 / 3 as f32) as usize + 1;
+        let threshold = 2 * faulty + 1;
         let core = Self {
             node_id,
             id: format!("node_{}", node_id),
             threshold,
+            faulty,
             state: VabaState::default(),
             promote_state: PromoteState::Init,
             rx_api,
@@ -174,8 +192,11 @@ impl VabaCore {
             broadcast_done: BTreeMap::new(),
             broadcast_skip: BTreeMap::new(),
             send_skip_share: BTreeSet::new(),
+            send_skip: BTreeSet::new(),
             recv_done: BTreeSet::new(),
+            recv_skip_share: BTreeSet::new(),
             skip_share_signs: BTreeMap::new(),
+            stop: false,
             threshold_signature: ThresholdSignatureScheme::new(threshold, total),
         };
 
@@ -226,7 +247,7 @@ impl VabaCore {
                 }
                 self.recv_done.insert(msg_hash);
                 // validate the message
-                let validate = self.handle_done_message(&done).await?;
+                let validate = self.handle_done_message(&done)?;
                 if !validate {
                     error!(
                         "recv done msg {} from node {} validate fail",
@@ -278,7 +299,61 @@ impl VabaCore {
                     self.send("skip-share", &json, node_id, address).await?;
                 }
             }
-            Message::SkipShare(skip_share) => {}
+            Message::SkipShare(skip_share) => {
+                let msg_hash = MessageHash {
+                    node_id: skip_share.node_id,
+                    view: skip_share.view,
+                    message_id: skip_share.message_id,
+                };
+                // first check if recv this SKIP SHARE message before
+                if self.recv_skip_share.contains(&msg_hash) {
+                    return Ok(());
+                }
+                let validate = self.handle_skip_share_message(&skip_share)?;
+                if !validate {
+                    error!(
+                        "recv skip_share msg {} from node {} validate fail",
+                        skip_share.message_id, skip_share.node_id
+                    );
+
+                    return Ok(());
+                }
+                let node_share_sign = (skip_share.node_id, skip_share.share_proof);
+                self.skip_share_signs
+                    .entry(skip_share.view)
+                    .and_modify(|f| f.push((node_share_sign.clone())))
+                    .or_insert(vec![node_share_sign]);
+
+                let node_share_signs = self.skip_share_signs.get(&skip_share.view).unwrap();
+                if self.threshold > node_share_signs.len() {
+                    return Ok(());
+                }
+                let signature = self.threshold_signature.threshold_sign(&node_share_signs)?;
+                // send `SKIP` message to all parties
+                let skip_message = SkipMessage {
+                    node_id: skip_share.node_id,
+                    view: skip_share.view,
+                    proof: signature,
+                    message_id: skip_share.message_id,
+                };
+                let msg_str = serde_json::to_string(&skip_message)?;
+                for (node_id, address) in &self.cluster.nodes {
+                    if *node_id == self.node_id {
+                        continue;
+                    }
+
+                    self.send("skip", &msg_str, node_id, address).await?;
+                }
+
+                // mark send `SKIP` message in this view
+                self.send_skip.insert(skip_share.view);
+                // mark skip[view] is true
+                self.skip.insert(skip_share.view);
+                // stop receiving promote message
+                self.stop = true;
+                // change to `ElectionLeader` state
+            }
+            Message::Skip(skip) => {}
         }
         Ok(())
     }
@@ -298,6 +373,9 @@ impl VabaCore {
 
     async fn handle_promote_message(&mut self, promote: PromoteMessage) -> Result<()> {
         self.metrics.incr_recv_promote();
+        if self.stop {
+            return Ok(());
+        }
         let from = &promote.node_id;
         let address = if let Some(address) = self.cluster.nodes.get(from) {
             address
@@ -423,7 +501,7 @@ impl VabaCore {
     }
 
     // return false if validate message fail
-    async fn handle_done_message(&self, done: &DoneMessage) -> Result<bool> {
+    fn handle_done_message(&self, done: &DoneMessage) -> Result<bool> {
         let proof_value = ProofValue {
             id: done.node_id,
             step: 4,
@@ -435,6 +513,23 @@ impl VabaCore {
             .threshold_validate(&value_string, &done.proof);
 
         Ok(validate)
+    }
+
+    fn handle_skip_share_message(&self, skip_share: &SkipShareMessage) -> Result<bool> {
+        let threshold_signature = &self.threshold_signature;
+        let proof_skip = ProofSkipShare {
+            id: skip_share.node_id,
+            view: skip_share.view,
+        };
+        let value_string = serde_json::to_string(&proof_skip)?;
+
+        Ok(
+            threshold_signature.share_validate(
+                self.node_id,
+                &value_string,
+                &skip_share.share_proof,
+            ),
+        )
     }
 
     fn external_vbba_validate(&self, _promote: &PromoteMessage) -> bool {
@@ -568,6 +663,7 @@ impl VabaCore {
                     if !self.init_promote().await? {
                         break;
                     }
+                    self.stop = false;
                 }
                 PromoteState::Promote(data) => {
                     self.promote_state = self.promote(1, data.clone()).await?;
@@ -649,23 +745,6 @@ impl VabaCore {
         value: &PromoteValue,
         signature: &Signature,
     ) -> Result<PromoteState> {
-        // calculate share sign of this node
-        let mut wait_skip_ack = WaitSkipAck {
-            value: value.clone(),
-            view: *view,
-            share_signs: BTreeMap::new(),
-        };
-        let proof_value = ProofValue {
-            id: self.node_id,
-            step: 4,
-            value: value.clone(),
-        };
-        let value_string = serde_json::to_string(&proof_value)?;
-        let share_sign = self
-            .threshold_signature
-            .share_sign(self.node_id, &value_string)?;
-        wait_skip_ack.share_signs.insert(self.node_id, share_sign);
-
         let message = DoneMessage {
             node_id: self.node_id,
             value: value.clone(),
@@ -680,7 +759,7 @@ impl VabaCore {
             self.send("done", &json, node_id, address).await?;
             self.metrics.incr_send_done();
         }
-        Ok(PromoteState::WaitSkip(wait_skip_ack))
+        Ok(PromoteState::WaitSkip(*view))
     }
 
     async fn promote(&self, step: Step, promote: PromoteData) -> Result<PromoteState> {
