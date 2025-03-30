@@ -11,7 +11,6 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
 use crate::base::AckMessage;
-use crate::base::ClusterConfig;
 use crate::base::DoneMessage;
 use crate::base::Message;
 use crate::base::MessageId;
@@ -103,6 +102,7 @@ pub struct VabaCore {
     id: ID,
 
     // threshold = 2 * faulty + 1
+    // faulty = total / 3
     threshold: usize,
     faulty: usize,
 
@@ -110,7 +110,8 @@ pub struct VabaCore {
 
     promote_state: PromoteState,
 
-    cluster: ClusterConfig,
+    // (node id, node address)
+    nodes: BTreeMap<NodeId, String>,
 
     rx_api: UnboundedReceiver<Message>,
 
@@ -180,9 +181,9 @@ impl VabaCore {
         node_id: NodeId,
         rx_api: UnboundedReceiver<Message>,
         rx_shutdown: oneshot::Receiver<()>,
-        cluster: ClusterConfig,
+        nodes: BTreeMap<NodeId, String>,
     ) -> Self {
-        let total = cluster.nodes.len();
+        let total = nodes.len();
         let faulty = (total as f32 / 3 as f32) as usize;
         // threshold = 2 * f + 1, f = number of faulty nodes
         let threshold = 2 * faulty + 1;
@@ -196,7 +197,7 @@ impl VabaCore {
             rx_api,
             rx_shutdown,
             http_client: Client::new(),
-            cluster,
+            nodes,
             proposal_values: Arc::new(Mutex::new(Vec::new())),
             //proposal_sender: Arc::new(Mutex::new(BTreeMap::new())),
             proposal_sender: BTreeMap::new(),
@@ -319,7 +320,7 @@ impl VabaCore {
                 let json = serde_json::to_string(&skip_share_msg)?;
 
                 // send skip-share message to all parties
-                for (node_id, address) in &self.cluster.nodes {
+                for (node_id, address) in &self.nodes {
                     if *node_id == self.node_id {
                         continue;
                     }
@@ -364,7 +365,7 @@ impl VabaCore {
                     message_id: skip_share.message_id,
                 };
                 let msg_str = serde_json::to_string(&skip_message)?;
-                for (node_id, address) in &self.cluster.nodes {
+                for (node_id, address) in &self.nodes {
                     if *node_id == self.node_id {
                         continue;
                     }
@@ -410,7 +411,7 @@ impl VabaCore {
                         message_id: skip.message_id,
                     };
                     let msg_str = serde_json::to_string(&skip_message)?;
-                    for (node_id, address) in &self.cluster.nodes {
+                    for (node_id, address) in &self.nodes {
                         if *node_id == self.node_id {
                             continue;
                         }
@@ -521,7 +522,7 @@ impl VabaCore {
         };
         let json = serde_json::to_string(&msg)?;
 
-        for (node_id, address) in &self.cluster.nodes {
+        for (node_id, address) in &self.nodes {
             if *node_id == self.node_id {
                 continue;
             }
@@ -549,7 +550,7 @@ impl VabaCore {
             return Ok(());
         }
         let from = &promote.node_id;
-        let address = if let Some(address) = self.cluster.nodes.get(from) {
+        let address = if let Some(address) = self.nodes.get(from) {
             address
         } else {
             return Ok(());
@@ -901,7 +902,7 @@ impl VabaCore {
             }
         };
         let json = serde_json::to_string(&msg)?;
-        for (node_id, address) in &self.cluster.nodes {
+        for (node_id, address) in &self.nodes {
             if *node_id == self.node_id {
                 continue;
             }
@@ -984,7 +985,7 @@ impl VabaCore {
             view: *view,
         };
         let json = serde_json::to_string(&message)?;
-        for (node_id, address) in &self.cluster.nodes {
+        for (node_id, address) in &self.nodes {
             if *node_id == self.node_id {
                 continue;
             }
@@ -1021,7 +1022,7 @@ impl VabaCore {
             proof: promote.proof.clone(),
         };
         let json = serde_json::to_string(&message)?;
-        for (node_id, address) in &self.cluster.nodes {
+        for (node_id, address) in &self.nodes {
             if *node_id == self.node_id {
                 continue;
             }
