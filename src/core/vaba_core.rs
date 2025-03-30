@@ -25,6 +25,7 @@ use crate::base::SkipShareMessage;
 use crate::base::Step;
 use crate::base::Value;
 use crate::base::View;
+use crate::base::ViewChangeMessage;
 use crate::base::ID;
 use crate::crypto::ThresholdCoinTossing;
 use crate::crypto::ThresholdSignatureScheme;
@@ -85,7 +86,7 @@ enum PromoteState {
     ElectionLeader(BTreeMap<NodeId, SignatureShare>),
 
     // view change
-    ViewChange(NodeId),
+    ViewChange((View, NodeId)),
 }
 
 struct DeliverValue {
@@ -430,7 +431,7 @@ impl VabaCore {
                         coin_share_set.clone().into_iter().collect();
                     let leader_id = coin_tossing.coin_toss(&msg, &share_signs)?;
                     // change state to VIEW-CHANGE
-                    self.promote_state = PromoteState::ViewChange(leader_id);
+                    self.promote_state = PromoteState::ViewChange((share.view, leader_id));
                 }
             }
         }
@@ -800,10 +801,53 @@ impl VabaCore {
                 PromoteState::ElectionLeader(coin_share_set) => {
                     break;
                 }
+                PromoteState::ViewChange((view, leader_id)) => {
+                    let ok = self.send_view_change(*view, *leader_id).await?;
+                    if !ok {
+                    } else {
+                    }
+                    break;
+                }
                 _ => break,
             }
         }
         Ok(())
+    }
+
+    async fn send_view_change(&self, view: View, leader_id: NodeId) -> Result<bool> {
+        let msg = {
+            let deliver = self.deliver.lock().await;
+            let view_deliver = if let Some(view_deliver) = deliver.get(&leader_id) {
+                view_deliver
+            } else {
+                error!("cannot find node {} deliver data", leader_id);
+                return Ok(false);
+            };
+
+            let deliver = if let Some(deliver) = view_deliver.get(&view) {
+                deliver
+            } else {
+                error!("cannot find node {} view {} deliver data", leader_id, view);
+                return Ok(false);
+            };
+
+            ViewChangeMessage {
+                node_id: leader_id,
+                view,
+                key: deliver.key.clone(),
+                lock: deliver.lock.clone(),
+                commit: deliver.commit.clone(),
+            }
+        };
+        let json = serde_json::to_string(&msg)?;
+        for (node_id, address) in &self.cluster.nodes {
+            if *node_id == self.node_id {
+                continue;
+            }
+
+            self.send("view-change", &json, node_id, address).await?;
+        }
+        Ok(true)
     }
 
     async fn select_promote_data(&self) -> Option<PromoteData> {

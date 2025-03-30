@@ -20,7 +20,7 @@ pub struct PromoteValue {
     pub message_id: MessageId,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PromoteValueWithProof {
     pub value: Value,
 
