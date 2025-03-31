@@ -11,7 +11,7 @@ use crate::base::{MessageId, NodeId, Step, Value, View};
 //  2.2 else, proof = signature of this view step - 1
 pub type Proof = Option<Signature>;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Stage {
     pub view: View,
     pub step: Step,
@@ -52,8 +52,8 @@ pub struct ProofValue {
 
 #[derive(Debug)]
 pub struct WaitAck {
-    // promote step
-    pub step: Step,
+    // promote stage
+    pub stage: Stage,
 
     pub data: PromoteData,
 

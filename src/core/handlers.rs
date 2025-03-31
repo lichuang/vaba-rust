@@ -89,7 +89,9 @@ pub async fn ack(req: Json<AckMessage>) -> actix_web::Result<impl Responder> {
     if let Err(e) = send_res {
         error!(
             "send to node {} core ack message {} error {:?}",
-            app.node_id, message_id, e
+            app.node_id,
+            message_id,
+            e.to_string()
         );
     }
 

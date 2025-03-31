@@ -5,6 +5,7 @@ pub struct Metrics {
     recv_proposal: AtomicU64,
 
     send_promote: AtomicU64,
+    send_ack: AtomicU64,
 }
 
 impl Metrics {
@@ -12,6 +13,7 @@ impl Metrics {
         Self {
             recv_proposal: AtomicU64::new(0),
             send_promote: AtomicU64::new(0),
+            send_ack: AtomicU64::new(0),
         }
     }
 
@@ -21,5 +23,9 @@ impl Metrics {
 
     pub fn incr_send_promote(&self) {
         self.send_promote.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn incr_send_ack(&self) {
+        self.send_ack.fetch_add(1, Ordering::Relaxed);
     }
 }

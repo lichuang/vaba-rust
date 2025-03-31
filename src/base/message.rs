@@ -59,7 +59,7 @@ pub struct PromoteMessage {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AckMessage {
     pub node_id: NodeId,
-    pub step: Step,
+    pub stage: Stage,
     pub message_id: MessageId,
     pub share_sign: SignatureShare,
 }
