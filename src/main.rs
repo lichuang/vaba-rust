@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         println!("node id {:?} not contain in the node map", args.id);
         return Ok(());
     }
-    setup_logger(1).unwrap();
+    setup_logger(args.id).unwrap();
     core::Vaba::start(args.id, nodes).await?;
 
     Ok(())

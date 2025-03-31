@@ -65,6 +65,7 @@ struct VabaState {
 }
 
 // state machine state of promote value progress
+#[derive(Debug)]
 enum PromoteState {
     Init,
 
@@ -98,8 +99,6 @@ struct DeliverValue {
 
 pub struct VabaCore {
     node_id: NodeId,
-
-    id: ID,
 
     // threshold = 2 * faulty + 1
     // faulty = total / 3
@@ -181,13 +180,12 @@ impl VabaCore {
         nodes: BTreeMap<NodeId, String>,
     ) -> Self {
         let total = nodes.len();
-        let faulty = (total as f32 / 3 as f32) as usize;
+        let faulty = total / 3;
         // threshold = 2 * f + 1, f = number of faulty nodes
-        let threshold = 2 * faulty + 1;
+        let threshold = total - faulty;
         let node_ids: Vec<u64> = nodes.keys().cloned().collect();
-        let core = Self {
+        Self {
             node_id,
-            id: format!("node_{}", node_id),
             threshold,
             faulty,
             state: VabaState::default(),
@@ -212,9 +210,7 @@ impl VabaCore {
             decide_values: Vec::new(),
             threshold_signature: ThresholdSignatureScheme::new(threshold, &node_ids),
             threshold_coin_tossing: ThresholdCoinTossing::new(threshold, &node_ids),
-        };
-
-        core
+        }
     }
 
     pub fn stop(&self) -> Result<()> {
@@ -227,6 +223,10 @@ impl VabaCore {
 
     async fn main_loop(&mut self) -> Result<()> {
         loop {
+            info!(
+                "current view {} state: {:?}",
+                self.state.current, self.promote_state
+            );
             self.update().await?;
 
             futures::select_biased! {
@@ -940,7 +940,7 @@ impl VabaCore {
         if let Some(promopt_data) = self.select_promote_data().await {
             info!(
                 "node {} select promote data {:?} in view {}",
-                self.id, promopt_data, self.state.current
+                self.node_id, promopt_data, self.state.current
             );
             self.promote_state = PromoteState::Promote(promopt_data);
             Ok(true)

@@ -45,6 +45,7 @@ pub struct ProofValue {
     pub value: PromoteValue,
 }
 
+#[derive(Debug)]
 pub struct WaitAck {
     // promote step
     pub step: Step,

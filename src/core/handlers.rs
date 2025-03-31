@@ -16,7 +16,6 @@ pub async fn proposal(req: Json<ClientProposalMessage>) -> actix_web::Result<imp
     let msg = req.into_inner();
 
     info!("node {} recv proposal message: {:?}", app.node_id, msg);
-    println!("node {} recv proposal message: {:?}", app.node_id, msg);
 
     let (tx, rx) = oneshot::channel::<ProposalMessageResp>();
     let message_id = msg.message_id;

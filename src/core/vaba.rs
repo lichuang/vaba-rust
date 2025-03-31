@@ -48,8 +48,8 @@ impl Vaba {
         // Start the actix-web server.
         let server = HttpServer::new(move || {
             actix_web::App::new()
-                .wrap(Logger::default())
-                .wrap(Logger::new("%a %{User-Agent}i"))
+                //.wrap(Logger::default())
+                //.wrap(Logger::new("%a %{User-Agent}i"))
                 .wrap(middleware::Compress::default())
                 // client RPC
                 .service(handlers::proposal)

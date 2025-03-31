@@ -107,24 +107,42 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let msg = ProposalMessage {
-        message_id: 1,
-        value: "100".to_string(),
-    };
-    let json = serde_json::to_string(&msg)?;
-    for (id, node) in nodes.iter() {
-        let (sender, rx) = oneshot::channel::<()>();
-        let value = NodeValue {
-            json: json.clone(),
-            sender,
-        };
-        let _ = node.tx_api.send(value);
-        let _v = rx.await?;
-        //println!("recv from node {}", id);
-    }
+    let faulty = nodes.len() / 3;
+    let threshold = nodes.len() - faulty;
+    println!(
+        "nodes: {}, faulty: {:?}, threshold: {:?}",
+        nodes.len(),
+        faulty,
+        threshold
+    );
+
     for i in 0..args.number {
-        //let mut handles = Vec::with_capacity(nodes.len());
-        for node in nodes.values() {}
+        let msg = ProposalMessage {
+            message_id: i as u64,
+            value: i.to_string(),
+        };
+        let json = serde_json::to_string(&msg)?;
+
+        let mut rx_vec = Vec::with_capacity(nodes.len());
+        for (_id, node) in nodes.iter() {
+            let (sender, rx) = oneshot::channel::<()>();
+            let value = NodeValue {
+                json: json.clone(),
+                sender,
+            };
+            let _ = node.tx_api.send(value);
+            rx_vec.push(rx);
+            //println!("recv from node {}", id);
+        }
+
+        let mut n = 0;
+        for rx in rx_vec {
+            let _v = rx.await?;
+            n += 1;
+            if n >= threshold {
+                break;
+            }
+        }
     }
 
     Ok(())
