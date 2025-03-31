@@ -7,6 +7,7 @@ description = ""
 [dependencies]
 actix-web = "4"
 anyhow = { version = "1.0.65" }
+clap = { version = "4.0", features = ["derive"] }
 futures = "0.3"
 tokio = { version = "1.35.0", features = ["full"] }
 rand = "0.7.3"
@@ -24,5 +25,11 @@ codegen-units = 1
 [[bin]]
 name = "vaba-server"
 path = "src/main.rs"
+doctest = false
+test = true
+
+[[bin]]
+name = "vaba-cli"
+path = "src/cli-main.rs"
 doctest = false
 test = true
