@@ -115,8 +115,6 @@ pub struct VabaCore {
 
     rx_api: UnboundedReceiver<Message>,
 
-    rx_shutdown: oneshot::Receiver<()>,
-
     http_client: Client,
 
     proposal_values: Arc<Mutex<Vec<(MessageId, Value)>>>,
@@ -180,7 +178,6 @@ impl VabaCore {
     pub fn new(
         node_id: NodeId,
         rx_api: UnboundedReceiver<Message>,
-        rx_shutdown: oneshot::Receiver<()>,
         nodes: BTreeMap<NodeId, String>,
     ) -> Self {
         let total = nodes.len();
@@ -196,11 +193,9 @@ impl VabaCore {
             state: VabaState::default(),
             promote_state: PromoteState::Init,
             rx_api,
-            rx_shutdown,
             http_client: Client::new(),
             nodes,
             proposal_values: Arc::new(Mutex::new(Vec::new())),
-            //proposal_sender: Arc::new(Mutex::new(BTreeMap::new())),
             proposal_sender: BTreeMap::new(),
             seen: BTreeSet::new(),
             metrics: Metrics::new(),

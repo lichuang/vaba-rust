@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use actix_web::middleware;
 use actix_web::middleware::Logger;
 use actix_web::HttpServer;
+use log::info;
 
 use crate::base::Message;
 use crate::base::NodeId;
@@ -12,7 +13,6 @@ use anyhow::Error;
 use tokio::spawn;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::handlers;
@@ -22,7 +22,6 @@ use super::vaba_core::VabaCore;
 pub struct Vaba {
     core_handle: JoinHandle<std::result::Result<(), Error>>,
     pub tx_api: UnboundedSender<Message>,
-    tx_shutdown: oneshot::Sender<()>,
     pub node_id: NodeId,
 }
 
@@ -35,16 +34,14 @@ impl Vaba {
 
     pub async fn start(node_id: NodeId, nodes: BTreeMap<NodeId, String>) -> std::io::Result<()> {
         let (tx_api, rx_api) = unbounded_channel();
-        let (tx_shutdown, rx_shutdown) = oneshot::channel::<()>();
 
         let address = nodes.get(&node_id).unwrap();
 
-        let core = VabaCore::new(node_id, rx_api, rx_shutdown, nodes.clone());
+        let core = VabaCore::new(node_id, rx_api, nodes.clone());
         let core_handle = spawn(core.main());
         let vaba = Vaba {
             core_handle,
             tx_api: tx_api.clone(),
-            tx_shutdown,
             node_id,
         };
         INSTANCE.set(Arc::new(vaba)).unwrap();
@@ -61,9 +58,19 @@ impl Vaba {
                 .service(handlers::ack)
                 .service(handlers::done)
                 .service(handlers::skip_share)
+                .service(handlers::share)
+                .service(handlers::view_change)
         });
 
         let x = server.bind(address)?;
-        x.run().await
+        info!(
+            "node {:?} start listening on address {:?} ..",
+            node_id, address
+        );
+        let ret = x.run().await;
+
+        info!("node {} stopped", node_id);
+
+        ret
     }
 }

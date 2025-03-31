@@ -10,12 +10,13 @@ use crate::{
     core::vaba::Vaba,
 };
 
-#[post("/prosoal")]
+#[post("/proposal")]
 pub async fn proposal(req: Json<ClientProposalMessage>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let msg = req.into_inner();
 
     info!("node {} recv proposal message: {:?}", app.node_id, msg);
+    println!("node {} recv proposal message: {:?}", app.node_id, msg);
 
     let (tx, rx) = oneshot::channel::<ProposalMessageResp>();
     let message_id = msg.message_id;
