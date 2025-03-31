@@ -2,7 +2,7 @@ use threshold_crypto::{Signature, SignatureShare};
 use tokio::sync::oneshot;
 
 use crate::{
-    core::{PromoteValue, PromoteValueWithProof, Proof},
+    core::{PromoteValue, PromoteValueWithProof, Proof, Stage},
     crypto::CoinShare,
 };
 
@@ -49,13 +49,11 @@ pub struct ProposalMessageResp {
 pub struct PromoteMessage {
     pub node_id: NodeId,
 
-    pub step: Step,
+    pub stage: Stage,
 
     pub value: PromoteValue,
 
     pub proof: Proof,
-
-    pub view: View,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
