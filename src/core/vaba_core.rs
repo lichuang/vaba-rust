@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use futures::sink;
 use log::error;
 use log::info;
 use reqwest::Client;
@@ -209,7 +208,7 @@ impl VabaCore {
             stop: false,
             decide_values: BTreeMap::new(),
             threshold_signature: ThresholdSignatureScheme::new(threshold - 1, &node_ids),
-            threshold_coin_tossing: ThresholdCoinTossing::new(threshold - 1, &node_ids),
+            threshold_coin_tossing: ThresholdCoinTossing::new(faulty, &node_ids),
         }
     }
 
@@ -395,7 +394,7 @@ impl VabaCore {
                 // stop receiving promote message
                 self.stop = true;
                 // change to `ElectionLeader` state
-                self.send_share_message(skip_share.node_id, skip_share.view, skip_share.message_id)
+                self.send_share_message(skip_share.view, skip_share.message_id)
                     .await?;
                 self.promote_state = PromoteState::ElectionLeader(BTreeMap::new());
             }
@@ -443,19 +442,15 @@ impl VabaCore {
                 }
 
                 // change to `ElectionLeader` state
-                self.send_share_message(skip.node_id, skip.view, skip.message_id)
-                    .await?;
+                self.send_share_message(skip.view, skip.message_id).await?;
                 self.promote_state = PromoteState::ElectionLeader(BTreeMap::new());
             }
             Message::Share(share) => {
                 if let PromoteState::ElectionLeader(coin_share_set) = &mut self.promote_state {
                     let coin_tossing = &self.threshold_coin_tossing;
-                    let coin_share = ProofCoinShare {
-                        node_id: share.node_id,
-                        view: share.view,
-                    };
+                    let coin_share = ProofCoinShare { view: share.view };
                     let msg = serde_json::to_string(&coin_share)?;
-                    if !coin_tossing.coin_share_validate(self.node_id, &msg, &share.proof) {
+                    if !coin_tossing.coin_share_validate(share.node_id, &msg, &share.proof) {
                         error!(
                             "recv share msg {} from node {} validate fail",
                             share.message_id, share.node_id
@@ -473,6 +468,7 @@ impl VabaCore {
                     let leader_id = coin_tossing.coin_toss(&msg, &share_signs)?;
                     // save view leader id
                     self.view_leader.insert(share.view, leader_id);
+                    info!("eleect node {} as view {} leader", leader_id, share.view);
                     // change state to VIEW-CHANGE
                     self.promote_state =
                         PromoteState::ViewChange(share.message_id, share.view, leader_id);
@@ -534,19 +530,14 @@ impl VabaCore {
         Ok(())
     }
 
-    async fn send_share_message(
-        &self,
-        node_id: NodeId,
-        view: View,
-        message_id: MessageId,
-    ) -> Result<()> {
+    async fn send_share_message(&self, view: View, message_id: MessageId) -> Result<()> {
         let coin_tossing = &self.threshold_coin_tossing;
-        let coin_share = ProofCoinShare { node_id, view };
+        let coin_share = ProofCoinShare { view };
         let msg = serde_json::to_string(&coin_share)?;
         let coin_share = coin_tossing.coin_share(self.node_id, &msg)?;
 
         let msg = ShareMessage {
-            node_id,
+            node_id: self.node_id,
             view,
             proof: coin_share,
             message_id,
