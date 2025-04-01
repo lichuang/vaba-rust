@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use futures::sink;
 use log::error;
 use log::info;
 use reqwest::Client;
@@ -266,11 +267,12 @@ impl VabaCore {
                     view: done.view,
                     message_id: done.value.message_id,
                 };
+
                 // first check if recv this DONE message before
                 if self.recv_done.contains(&msg_hash) {
                     return Ok(());
                 }
-                self.recv_done.insert(msg_hash);
+
                 // validate the message
                 let validate = self.handle_done_message(&done)?;
                 if !validate {
@@ -281,6 +283,9 @@ impl VabaCore {
                     return Ok(());
                 }
 
+                self.recv_done.insert(msg_hash);
+
+                // update view done counter
                 self.broadcast_done
                     .entry(done.view)
                     .and_modify(|done| *done += 1)
@@ -292,11 +297,16 @@ impl VabaCore {
                 }
                 // check if this view skip-share message has been send before
                 if self.send_skip_share.contains(&done.view) {
+                    info!(
+                        "node {} has send skip-share in view {} before",
+                        self.node_id, done.view
+                    );
                     return Ok(());
                 }
 
                 self.send_skip_share.insert(done.view);
                 let proof_skip = ProofSkipShare {
+                    // use done.node_id, now self.node_id
                     id: done.node_id,
                     view: done.view,
                 };
@@ -310,6 +320,7 @@ impl VabaCore {
 
                 let skip_share_msg = SkipShareMessage {
                     node_id: self.node_id,
+                    from: done.node_id,
                     view: done.view,
                     share_proof: share_sign,
                     message_id: done.value.message_id,
@@ -326,7 +337,7 @@ impl VabaCore {
             }
             Message::SkipShare(skip_share) => {
                 let msg_hash = MessageHash {
-                    node_id: skip_share.node_id,
+                    node_id: skip_share.from,
                     view: skip_share.view,
                     message_id: skip_share.message_id,
                 };
@@ -334,11 +345,11 @@ impl VabaCore {
                 if self.recv_skip_share.contains(&msg_hash) {
                     return Ok(());
                 }
-                let validate = self.handle_skip_share_message(&skip_share)?;
+                let validate = self.validate_skip_share_message(&skip_share)?;
                 if !validate {
                     error!(
-                        "recv skip_share msg {} from node {} validate fail",
-                        skip_share.message_id, skip_share.node_id
+                        "recv skip_share msg {} from node {} of node {} validate fail",
+                        skip_share.message_id, skip_share.node_id, skip_share.from
                     );
 
                     return Ok(());
@@ -353,10 +364,17 @@ impl VabaCore {
                 if self.threshold > node_share_signs.len() {
                     return Ok(());
                 }
-                let signature = self.threshold_signature.threshold_sign(&node_share_signs)?;
+                let signature = match self.threshold_signature.threshold_sign(&node_share_signs) {
+                    Ok(signature) => signature,
+                    Err(e) => {
+                        error!("threshold_sign skip share message error: {:?}", e);
+                        return Err(e);
+                    }
+                };
                 // send `SKIP` message to all parties
                 let skip_message = SkipMessage {
-                    node_id: skip_share.node_id,
+                    node_id: self.node_id,
+                    from: skip_share.from,
                     view: skip_share.view,
                     proof: signature,
                     message_id: skip_share.message_id,
@@ -382,19 +400,25 @@ impl VabaCore {
                 self.promote_state = PromoteState::ElectionLeader(BTreeMap::new());
             }
             Message::Skip(skip) => {
-                let validate = self.handle_skip_message(&skip)?;
+                let view = skip.view;
+                if self.skip.contains(&view) {
+                    info!(
+                        "node {} has seen skip of view {} msg before",
+                        self.node_id, view
+                    );
+                    return Ok(());
+                }
+
+                let validate = self.validate_skip_message(&skip)?;
                 if !validate {
                     error!(
-                        "recv skip msg {} from node {} validate fail",
-                        skip.message_id, skip.node_id
+                        "recv skip msg {} from node {} of node {} validate fail",
+                        skip.message_id, skip.node_id, skip.from,
                     );
 
                     return Ok(());
                 }
-                let view = skip.view;
-                if self.skip.contains(&view) {
-                    return Ok(());
-                }
+
                 // mark skip[view] is true
                 self.skip.insert(view);
 
@@ -402,7 +426,8 @@ impl VabaCore {
                     self.send_skip.insert(view);
                     // send `SKIP` message to all parties
                     let skip_message = SkipMessage {
-                        node_id: skip.node_id,
+                        node_id: self.node_id,
+                        from: skip.from,
                         view: skip.view,
                         proof: skip.proof.clone(),
                         message_id: skip.message_id,
@@ -538,10 +563,11 @@ impl VabaCore {
         Ok(())
     }
 
-    fn handle_skip_message(&self, skip: &SkipMessage) -> Result<bool> {
+    fn validate_skip_message(&self, skip: &SkipMessage) -> Result<bool> {
         let threshold_signature = &self.threshold_signature;
         let proof_skip = ProofSkipShare {
-            id: skip.node_id,
+            // use from not node id
+            id: skip.from,
             view: skip.view,
         };
         let json = serde_json::to_string(&proof_skip)?;
@@ -773,21 +799,21 @@ impl VabaCore {
         Ok(validate)
     }
 
-    fn handle_skip_share_message(&self, skip_share: &SkipShareMessage) -> Result<bool> {
+    fn validate_skip_share_message(&self, skip_share: &SkipShareMessage) -> Result<bool> {
         let threshold_signature = &self.threshold_signature;
         let proof_skip = ProofSkipShare {
-            id: skip_share.node_id,
+            // use from, not node_id
+            id: skip_share.from,
             view: skip_share.view,
         };
         let value_string = serde_json::to_string(&proof_skip)?;
 
-        Ok(
-            threshold_signature.share_validate(
-                self.node_id,
-                &value_string,
-                &skip_share.share_proof,
-            ),
-        )
+        Ok(threshold_signature.share_validate(
+            // use skip_share.node_id, not self.node_id
+            skip_share.node_id,
+            &value_string,
+            &skip_share.share_proof,
+        ))
     }
 
     fn external_provable_broadcast_validate(&self, promote: &PromoteMessage) -> Result<bool> {
@@ -1055,6 +1081,18 @@ impl VabaCore {
             }
             "ack" => {
                 self.metrics.incr_send_ack();
+            }
+            "done" => {
+                self.metrics.incr_send_done();
+            }
+            "skip-share" => {
+                self.metrics.incr_send_skip_share();
+            }
+            "skip" => {
+                self.metrics.incr_send_skip();
+            }
+            "share" => {
+                self.metrics.incr_send_share();
             }
             _ => {}
         }

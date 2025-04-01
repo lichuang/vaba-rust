@@ -79,6 +79,8 @@ pub struct DoneMessage {
 pub struct SkipShareMessage {
     pub node_id: NodeId,
 
+    pub from: NodeId,
+
     pub message_id: MessageId,
 
     pub share_proof: SignatureShare,
@@ -89,6 +91,8 @@ pub struct SkipShareMessage {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SkipMessage {
     pub node_id: NodeId,
+
+    pub from: NodeId,
 
     pub view: View,
 

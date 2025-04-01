@@ -22,8 +22,9 @@ pub struct Party {
     pk_share: PublicKeyShare,
 }
 
-// each ThresholdSignatureScheme use a CONSTANT seed to generate random instead of rand::thread_rng
-// otherwise, signature will be validated fail when acroosing different process.
+// Each ThresholdSignatureScheme use a CONSTANT seed to generate random instead of rand::thread_rng.
+// Otherwise, signature will be validated fail when acroosing different process.
+// For now, we just hard code this seed.But in production, assign the seed in config file, etc.
 pub const SEED: [u8; 32] = [42; 32];
 
 impl ThresholdSignatureScheme {
