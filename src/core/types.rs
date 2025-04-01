@@ -5,12 +5,9 @@ use threshold_crypto::{Signature, SignatureShare};
 use crate::base::{MessageId, NodeId, Step, Value, View};
 
 // a 4-stage proof,
-// 1) if view == 1 and step == 1, proof = None
-// 2) if view > 1:
-//  2.1 if step = 1, proof = signature of view - 1 step 4;
-//  2.2 else, proof = signature of this view step - 1
+// 1) if step == 1, proof = None
+// 2) if step > 1: proof = signature of this view step - 1
 pub type Proof = Option<Signature>;
-pub type ExternalProof = String;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Stage {
@@ -45,14 +42,14 @@ pub struct PromoteData {
 }
 
 // proof value include: node `id` in `stage` promote `value`
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProofValue {
     pub stage: Stage,
     pub value: PromoteValue,
 }
 
 #[derive(Debug)]
-pub struct WaitAck {
+pub struct Ack {
     // promote stage
     pub stage: Stage,
 

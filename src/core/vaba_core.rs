@@ -31,6 +31,7 @@ use anyhow::Result;
 use futures::FutureExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::Ack;
 use super::MessageHash;
 use super::Metrics;
 use super::PromoteData;
@@ -39,7 +40,6 @@ use super::PromoteValueWithProof;
 use super::ProofCoinShare;
 use super::ProofSkipShare;
 use super::ProofValue;
-use super::WaitAck;
 
 struct VabaState {
     // the highest view number for which the party ever received
@@ -67,7 +67,7 @@ enum PromoteState {
     Promote(PromoteData),
 
     // wait promote with 2f + 1 ack return
-    WaitAck(WaitAck),
+    Ack(Ack),
 
     // promote success, notify all parties DONE
     Done(View, PromoteValue, Signature),
@@ -591,18 +591,23 @@ impl VabaCore {
 
         // calculate share sign of this node
         let proof_value = ProofValue {
-            // use last step signature as in proof
-            stage: Stage {
-                view: view,
-                //step: step - 1,
-                step,
-            },
+            stage: Stage { view: view, step },
             value: promote.value.clone(),
         };
         let value_string = serde_json::to_string(&proof_value)?;
         let share_sign = self
             .threshold_signature
             .share_sign(self.node_id, &value_string)?;
+        /*
+        assert!(self
+            .threshold_signature
+            .share_validate(self.node_id, &value_string, &share_sign));
+        */
+
+        info!(
+            "node {} ack node {} proof_value: {}",
+            self.node_id, promote.value.node_id, value_string
+        );
 
         // deliver promote value
         self.deliver(&promote).await;
@@ -621,11 +626,15 @@ impl VabaCore {
     }
 
     async fn handle_ack_message(&mut self, resp: AckMessage) -> Result<()> {
-        let wait_promote_ack = if let PromoteState::WaitAck(wait) = &mut self.promote_state {
+        // ack only send to the promote data node
+        assert!(resp.node_id == self.node_id);
+        assert!(resp.from != self.node_id);
+
+        let wait_promote_ack = if let PromoteState::Ack(wait) = &mut self.promote_state {
             wait
         } else {
             error!(
-                "recv ack message {} from {} but not in WaitAck state",
+                "recv ack message {} from {} but not in Ack state",
                 resp.message_id, resp.node_id
             );
             return Ok(());
@@ -662,6 +671,28 @@ impl VabaCore {
             error!(
                 "recv ack message {} from {} but has been skip",
                 resp.message_id, resp.node_id
+            );
+            return Ok(());
+        }
+
+        // validate the ack share signature
+        let proof_value = ProofValue {
+            stage: resp.stage.clone(),
+            value: PromoteValue {
+                node_id: self.node_id,
+                value: wait_promote_ack.data.value.value.clone(),
+                message_id: resp.message_id,
+            },
+        };
+        let json = serde_json::to_string(&proof_value)?;
+        if !self
+            .threshold_signature
+            .share_validate(resp.from, &json, &resp.share_sign)
+        {
+            info!("validate node {} ack proof_value {}", resp.from, json);
+            error!(
+                "recv stage {:?} ack messgae {} from {} but validate fail",
+                resp.stage, resp.message_id, resp.from
             );
             return Ok(());
         }
@@ -767,11 +798,12 @@ impl VabaCore {
         let from = promote.value.node_id;
 
         let signature = if let Some(signature) = &promote.proof {
+            assert!(step > 1);
             signature
         } else {
-            info!("proof is None in {} {}", view, step);
+            //info!("proof is None in {} {}", view, step);
             // only view=1 and step=1 allow None proof
-            if view != 1 && step != 1 {
+            if step != 1 {
                 error!(
                     "recv promote message {} from node {} but with None signature in ({}, {})",
                     message_id, from, view, step
@@ -797,8 +829,8 @@ impl VabaCore {
         }
 
         error!(
-            "recv stage {:?} promote message {:?} from node {} validate fail",
-            stage, promote.value, from
+            "recv stage {:?} proof message {:?} from node {} validate fail",
+            stage, proof_value, from
         );
 
         /*
@@ -1069,7 +1101,10 @@ impl VabaCore {
     }
 
     async fn promote(&self, step: Step, promote: PromoteData) -> Result<PromoteState> {
-        let mut promote_resp = WaitAck {
+        // node can only promote it's own value
+        assert!(promote.value.node_id == self.node_id);
+
+        let mut ack = Ack {
             stage: Stage {
                 view: promote.view,
                 step,
@@ -1077,14 +1112,13 @@ impl VabaCore {
             data: promote.clone(),
             share_signs: BTreeMap::new(),
         };
-        let last_stage = Stage {
-            view: promote.view,
-            step,
-        };
-        // calculate share sign of this node
+
+        // calculate (view, step) value share sign of this node
         let proof_value = ProofValue {
-            // use last step signature as in proof
-            stage: last_stage,
+            stage: Stage {
+                view: promote.view,
+                step,
+            },
             value: promote.value.clone(),
         };
         let value_string = serde_json::to_string(&proof_value)?;
@@ -1096,7 +1130,7 @@ impl VabaCore {
             message_id: promote.value.message_id,
             view: promote.view,
         };
-        promote_resp.share_signs.insert(msg_hash, share_sign);
+        ack.share_signs.insert(msg_hash, share_sign);
 
         let message = PromoteMessage {
             stage: Stage {
@@ -1107,14 +1141,17 @@ impl VabaCore {
             proof: promote.proof.clone(),
         };
         let json = serde_json::to_string(&message)?;
-        info!("promote step {} data {:?}", step, promote);
+        info!(
+            "promote stage {:?} for message {:?}",
+            message.stage, message
+        );
         for (node_id, address) in &self.nodes {
             if *node_id == self.node_id {
                 continue;
             }
             self.send("promote", &json, node_id, address).await?;
         }
-        Ok(PromoteState::WaitAck(promote_resp))
+        Ok(PromoteState::Ack(ack))
     }
 }
 
@@ -1130,14 +1167,13 @@ impl DeliverValue {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use anyhow::Result;
     use threshold_crypto::{Signature, SignatureShare};
 
     use crate::{
         base::{NodeId, Step},
-        core::{PromoteData, PromoteValue, ProofValue, Stage},
+        core::{PromoteValue, ProofValue, Stage},
         crypto::ThresholdSignatureScheme,
     };
 
@@ -1155,10 +1191,10 @@ mod tests {
         // iterator node ids, make each of them as a view promoter
         for i in &node_ids {
             let promoter = *i as NodeId;
-            // each view step=1's in proof is None
+            // for each view, when step=1 the in proof is None
             let mut in_proof: Option<Signature> = None;
 
-            // create promote value and proof(which is None in view=1 and step=1)
+            // create promote value
             let promote_value = PromoteValue {
                 node_id: promoter,
                 value: value.to_string(),
@@ -1210,6 +1246,7 @@ mod tests {
                     // each node generate their share signature of this step
                     let id = *i;
                     let share_sign = threshold_signature.share_sign(id, &json)?;
+                    // assert the share signature is validate
                     assert!(threshold_signature.share_validate(id, &json, &share_sign));
                     share_signs.push((id, share_sign));
 

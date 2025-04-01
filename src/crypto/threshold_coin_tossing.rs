@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use rand::rngs::StdRng;
 use threshold_crypto::PublicKeySet;
 use threshold_crypto::SecretKeySet;
 use threshold_crypto::SignatureShare;
@@ -7,9 +8,11 @@ use threshold_crypto::SIG_SIZE;
 
 use crate::base::NodeId;
 use crate::base::Value;
+use crate::crypto::threshold_signature::SEED;
 use crate::crypto::Party;
 use anyhow::Error;
 use anyhow::Result;
+use rand::SeedableRng;
 
 pub type CoinShare = SignatureShare;
 
@@ -23,7 +26,8 @@ impl ThresholdCoinTossing {
     pub fn new(threshold: usize, node_ids: &[NodeId]) -> Self {
         assert!(node_ids.len() >= threshold);
 
-        let mut rng = rand::thread_rng();
+        //let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_seed(SEED);
         let sk_set = SecretKeySet::random(threshold, &mut rng);
         let pk_set = sk_set.public_keys();
 

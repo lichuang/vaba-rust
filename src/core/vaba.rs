@@ -3,24 +3,21 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use actix_web::middleware;
-use actix_web::middleware::Logger;
 use actix_web::HttpServer;
 use log::info;
 
 use crate::base::Message;
 use crate::base::NodeId;
-use anyhow::Error;
 use tokio::spawn;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinHandle;
 
 use super::handlers;
 use super::vaba_core::VabaCore;
 
 #[derive(Debug)]
 pub struct Vaba {
-    core_handle: JoinHandle<std::result::Result<(), Error>>,
+    //core_handle: JoinHandle<std::result::Result<(), Error>>,
     pub tx_api: UnboundedSender<Message>,
     pub node_id: NodeId,
 }
@@ -38,9 +35,9 @@ impl Vaba {
         let address = nodes.get(&node_id).unwrap();
 
         let core = VabaCore::new(node_id, rx_api, nodes.clone());
-        let core_handle = spawn(core.main());
+        let _core_handle = spawn(core.main());
         let vaba = Vaba {
-            core_handle,
+            //core_handle,
             tx_api: tx_api.clone(),
             node_id,
         };
@@ -51,7 +48,7 @@ impl Vaba {
                 //.wrap(Logger::default())
                 //.wrap(Logger::new("%a %{User-Agent}i"))
                 .wrap(middleware::Compress::default())
-                // client RPC
+                // client proposal data RPC
                 .service(handlers::proposal)
                 // node internal RPC
                 .service(handlers::promote)

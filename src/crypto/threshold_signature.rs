@@ -2,6 +2,9 @@ use crate::base::NodeId;
 use crate::base::Value;
 use anyhow::Error;
 use anyhow::Result;
+use log::error;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use std::collections::BTreeMap;
 
 use threshold_crypto::{
@@ -19,11 +22,16 @@ pub struct Party {
     pk_share: PublicKeyShare,
 }
 
+// each ThresholdSignatureScheme use a CONSTANT seed to generate random instead of rand::thread_rng
+// otherwise, signature will be validated fail when acroosing different process.
+pub const SEED: [u8; 32] = [42; 32];
+
 impl ThresholdSignatureScheme {
     pub fn new(threshold: usize, node_ids: &[NodeId]) -> Self {
         assert!(node_ids.len() >= threshold);
 
-        let mut rng = rand::thread_rng();
+        //let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_seed(SEED);
         let sk_set = SecretKeySet::random(threshold, &mut rng);
         let pk_set = sk_set.public_keys();
 
@@ -56,6 +64,7 @@ impl ThresholdSignatureScheme {
         if let Some(party) = party {
             party.validate(msg, share_sign)
         } else {
+            error!("cannot find party {}", i);
             false
         }
     }
