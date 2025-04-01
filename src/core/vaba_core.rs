@@ -23,7 +23,7 @@ use crate::base::SkipShareMessage;
 use crate::base::Step;
 use crate::base::Value;
 use crate::base::View;
-use crate::base::ViewChangeMessage;
+use crate::base::ViewChange;
 use crate::core::Stage;
 use crate::crypto::ThresholdCoinTossing;
 use crate::crypto::ThresholdSignatureScheme;
@@ -474,40 +474,17 @@ impl VabaCore {
                         PromoteState::ViewChange(share.message_id, share.view, leader_id);
                 }
             }
-            Message::ViewChangeMessage(view_change) => {
-                let leader_id = view_change.leader_id;
+            Message::ViewChange(view_change) => {
                 let view = view_change.view;
                 let lock = &view_change.lock;
                 let key = &view_change.key;
                 let commit = &view_change.commit;
-                let threshold_signature = &self.threshold_signature;
 
                 // validate commit value
                 if let Some(commit) = commit {
-                    let proof = &commit.proof;
-                    let value = commit.value.clone();
-                    let proof_value = ProofValue {
-                        stage: Stage {
-                            view: view_change.view,
-                            step: 3,
-                        },
-                        value: value.clone(),
-                    };
-                    let json = serde_json::to_string(&proof_value)?;
-                    if threshold_signature.threshold_validate(&json, proof) {
-                        // now the value is decided!!
-                        info!(
-                            "node {} decide value {:?} promoted by node {}",
-                            self.node_id, value, leader_id
-                        );
-                        assert!(!self.decide_values.contains_key(&view));
-                        self.decide_values.insert(
-                            view,
-                            PromoteValueWithProof {
-                                value: commit.value.clone(),
-                                proof: proof.clone(),
-                            },
-                        );
+                    if let Ok(Some(value)) = self.decide_commit(&view_change, commit) {
+                        self.decide_values.insert(view, value);
+
                         // response to the client
                         if let Some(tx) = self.proposal_sender.remove(&commit.value.message_id) {
                             let resp = ProposalMessageResp {
@@ -525,9 +502,139 @@ impl VabaCore {
                         }
                     }
                 }
+
+                // validate lock value
+                if let Some(lock_value_proof) = lock {
+                    if let Ok(Some(lock)) = self.decide_lock(&view_change, lock_value_proof) {
+                        info!("node {} update lock to {}", self.node_id, lock);
+                        self.state.lock = Some(lock);
+                    }
+                }
+
+                // validate key value
+                if let Some(key_value_proof) = key {
+                    if let Ok(Some(new_key)) = self.decide_key(&view_change, key_value_proof) {
+                        info!("node {} update key to {:?}", self.node_id, new_key);
+                        self.state.key = Some(new_key);
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    // return the new key data, None if no update
+    fn decide_commit(
+        &self,
+        view_change: &ViewChange,
+        commit: &PromoteValueWithProof,
+    ) -> Result<Option<PromoteValueWithProof>> {
+        let view = view_change.view;
+        if let Some(committed_value) = self.decide_values.get(&view) {
+            // if commit value of this view before, assert they are the same value
+            assert_eq!(commit, committed_value);
+            return Ok(None);
+        }
+
+        let node_id = view_change.node_id;
+        let leader_id = view_change.leader_id;
+
+        let proof = &commit.proof;
+        let value = commit.value.clone();
+        let proof_value = ProofValue {
+            stage: Stage { view, step: 3 },
+            value: value.clone(),
+        };
+        let json = serde_json::to_string(&proof_value)?;
+        if !self.threshold_signature.threshold_validate(&json, proof) {
+            error!("view-change commit from node {} validate fail", node_id);
+            return Ok(None);
+        }
+
+        // now the value is decided!!
+        info!(
+            "node {} decide value {:?} promoted by node {} in view {}",
+            self.node_id, value, leader_id, view,
+        );
+
+        Ok(Some(PromoteValueWithProof {
+            value: commit.value.clone(),
+            proof: proof.clone(),
+        }))
+    }
+
+    // return the new key data, None if no update
+    fn decide_key(
+        &self,
+        view_change: &ViewChange,
+        value_proof: &PromoteValueWithProof,
+    ) -> Result<Option<(View, Signature, PromoteValue)>> {
+        let view = view_change.view;
+        let node_id = view_change.node_id;
+
+        if let Some((state_view, _, _)) = self.state.key {
+            // receive older promote value, ignore it
+            if view <= state_view {
+                info!(
+                    "recv view {} view-change key data, older than key view {}",
+                    view, state_view
+                );
+                return Ok(None);
+            }
+        }
+
+        let proof = &value_proof.proof;
+        let value = value_proof.value.clone();
+        let proof_value = ProofValue {
+            stage: Stage { view, step: 1 },
+            value: value.clone(),
+        };
+        let json = serde_json::to_string(&proof_value)?;
+        if !self.threshold_signature.threshold_validate(&json, proof) {
+            error!("view-change key from node {} validate fail", node_id);
+            Ok(None)
+        } else {
+            Ok(Some((
+                view,
+                value_proof.proof.clone(),
+                value_proof.value.clone(),
+            )))
+        }
+    }
+
+    // return the new lock view, None if no update lock view
+    fn decide_lock(
+        &self,
+        view_change: &ViewChange,
+        value_proof: &PromoteValueWithProof,
+    ) -> Result<Option<View>> {
+        let view = view_change.view;
+        let node_id = view_change.node_id;
+
+        if let Some(lock_view) = self.state.lock {
+            // receive older promote value, ignore it
+            if view <= lock_view {
+                info!(
+                    "recv view {} view-change lock data, older than lock {}",
+                    view, lock_view
+                );
+                return Ok(None);
+            }
+        }
+
+        let proof = &value_proof.proof;
+        let value = value_proof.value.clone();
+        let proof_value = ProofValue {
+            stage: Stage { view, step: 2 },
+            value: value.clone(),
+        };
+        let json = serde_json::to_string(&proof_value)?;
+        if self.threshold_signature.threshold_validate(&json, proof) {
+            error!("view-change lock from node {} validate fail", node_id);
+            Ok(None)
+        } else {
+            Ok(Some(view))
+        }
     }
 
     async fn send_share_message(&self, view: View, message_id: MessageId) -> Result<()> {
@@ -981,9 +1088,9 @@ impl VabaCore {
                 return Ok(false);
             };
 
-            ViewChangeMessage {
-                leader_id: leader_id,
+            ViewChange {
                 node_id: self.node_id,
+                leader_id,
                 view,
                 message_id,
                 key: deliver.key.clone(),
@@ -1084,6 +1191,9 @@ impl VabaCore {
             }
             "share" => {
                 self.metrics.incr_send_share();
+            }
+            "view-change" => {
+                self.metrics.incr_send_view_change();
             }
             _ => {}
         }

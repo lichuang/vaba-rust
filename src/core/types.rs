@@ -16,7 +16,7 @@ pub struct Stage {
 }
 
 // a promote value include: (node_id, value, message id)
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct PromoteValue {
     pub node_id: NodeId,
 
@@ -25,7 +25,7 @@ pub struct PromoteValue {
     pub message_id: MessageId,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct PromoteValueWithProof {
     pub value: PromoteValue,
 

@@ -10,6 +10,7 @@ pub struct Metrics {
     send_skip_share: AtomicU64,
     send_skip: AtomicU64,
     send_share: AtomicU64,
+    send_view_change: AtomicU64,
 }
 
 impl Metrics {
@@ -22,6 +23,7 @@ impl Metrics {
             send_skip_share: AtomicU64::new(0),
             send_skip: AtomicU64::new(0),
             send_share: AtomicU64::new(0),
+            send_view_change: AtomicU64::new(0),
         }
     }
 
@@ -51,5 +53,9 @@ impl Metrics {
 
     pub fn incr_send_share(&self) {
         self.send_share.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn incr_send_view_change(&self) {
+        self.send_view_change.fetch_add(1, Ordering::Relaxed);
     }
 }

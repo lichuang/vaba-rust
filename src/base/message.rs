@@ -24,7 +24,7 @@ pub enum Message {
 
     Share(ShareMessage),
 
-    ViewChangeMessage(ViewChangeMessage),
+    ViewChange(ViewChange),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -113,7 +113,7 @@ pub struct ShareMessage {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ViewChangeMessage {
+pub struct ViewChange {
     pub node_id: NodeId,
     pub leader_id: NodeId,
 

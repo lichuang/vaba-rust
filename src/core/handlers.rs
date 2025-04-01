@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 use crate::{
     base::{
         AckMessage, ClientProposalMessage, DoneMessage, Message, PromoteMessage, ProposalMessage,
-        ProposalMessageResp, ShareMessage, SkipMessage, SkipShareMessage, ViewChangeMessage,
+        ProposalMessageResp, ShareMessage, SkipMessage, SkipShareMessage, ViewChange,
     },
     core::vaba::Vaba,
 };
@@ -183,7 +183,7 @@ pub async fn share(req: Json<ShareMessage>) -> actix_web::Result<impl Responder>
 }
 
 #[post("/view-change")]
-pub async fn view_change(req: Json<ViewChangeMessage>) -> actix_web::Result<impl Responder> {
+pub async fn view_change(req: Json<ViewChange>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
 
@@ -192,7 +192,7 @@ pub async fn view_change(req: Json<ViewChangeMessage>) -> actix_web::Result<impl
         app.node_id, message.message_id, message.node_id
     );
     let message_id = message.message_id;
-    let send_res = app.tx_api.send(Message::ViewChangeMessage(message));
+    let send_res = app.tx_api.send(Message::ViewChange(message));
     if let Err(e) = send_res {
         error!(
             "send to node {} core view-change message {} error {:?}",
