@@ -464,12 +464,8 @@ impl VabaCore {
                 // validate commit value
                 if let Some(commit) = commit {
                     let proof = &commit.proof;
-                    let value = PromoteValue {
-                        value: commit.value.clone(),
-                        message_id: commit.message_id,
-                    };
+                    let value = commit.value.clone();
                     let proof_value = ProofValue {
-                        id: leader_id,
                         stage: Stage {
                             view: view_change.view,
                             step: 3,
@@ -488,12 +484,11 @@ impl VabaCore {
                             view,
                             PromoteValueWithProof {
                                 value: commit.value.clone(),
-                                message_id: commit.message_id,
                                 proof: proof.clone(),
                             },
                         );
                         // response to the client
-                        if let Some(tx) = self.proposal_sender.remove(&commit.message_id) {
+                        if let Some(tx) = self.proposal_sender.remove(&commit.value.message_id) {
                             let resp = ProposalMessageResp {
                                 ok: true,
                                 error: None,
@@ -501,11 +496,11 @@ impl VabaCore {
                             if let Err(e) = tx.send(resp.clone()) {
                                 error!(
                                     "resp proposal message {} to client error {:?}",
-                                    commit.message_id, e
+                                    commit.value.message_id, e
                                 );
                             }
                         } else {
-                            error!("cannot find channel of message {}", commit.message_id);
+                            error!("cannot find channel of message {}", commit.value.message_id);
                         }
                     }
                 }
@@ -557,9 +552,13 @@ impl VabaCore {
 
     async fn handle_promote_message(&mut self, promote: PromoteMessage) -> Result<()> {
         if self.stop {
+            error!(
+                "recv message {} from node {} but stopped",
+                promote.value.message_id, promote.value.node_id
+            );
             return Ok(());
         }
-        let from = &promote.node_id;
+        let from = &promote.value.node_id;
         let address = if let Some(address) = self.nodes.get(from) {
             address
         } else {
@@ -592,11 +591,11 @@ impl VabaCore {
 
         // calculate share sign of this node
         let proof_value = ProofValue {
-            id: promote.node_id,
             // use last step signature as in proof
             stage: Stage {
                 view: view,
-                step: step - 1,
+                //step: step - 1,
+                step,
             },
             value: promote.value.clone(),
         };
@@ -609,7 +608,8 @@ impl VabaCore {
         self.deliver(&promote).await;
 
         let resp = AckMessage {
-            node_id: self.node_id,
+            node_id: promote.value.node_id,
+            from: self.node_id,
             message_id: promote.value.message_id,
             stage: promote.stage.clone(),
             share_sign,
@@ -647,6 +647,15 @@ impl VabaCore {
             return Ok(());
         }
 
+        if resp.node_id != self.node_id {
+            error!(
+                "recv ack message {} from {} but not the same message, expected message id {}",
+                resp.message_id, resp.node_id, wait_promote_ack.data.value.message_id,
+            );
+
+            return Ok(());
+        }
+
         // if this view has been skip, ignore and return
         let view = wait_promote_ack.data.view;
         if self.skip.contains(&view) {
@@ -657,9 +666,15 @@ impl VabaCore {
             return Ok(());
         }
 
+        let msg_hash = MessageHash {
+            node_id: resp.from,
+            message_id: resp.message_id,
+            view: resp.stage.view,
+        };
+
         wait_promote_ack
             .share_signs
-            .insert(resp.node_id, resp.share_sign);
+            .insert(msg_hash, resp.share_sign);
 
         // if not reach 2f+1 aggrement, just return
         if wait_promote_ack.share_signs.len() < self.threshold {
@@ -674,8 +689,11 @@ impl VabaCore {
         }
 
         // now step has reach aggrement, move to the next step(step < 4) or leader election phase(step == 4)
-        let share_signs: Vec<(NodeId, SignatureShare)> =
-            wait_promote_ack.share_signs.clone().into_iter().collect();
+        let mut share_signs: Vec<(NodeId, SignatureShare)> = Vec::new();
+        for (msg_hash, signature) in &wait_promote_ack.share_signs {
+            share_signs.push((msg_hash.node_id, signature.clone()));
+        }
+
         let signature = self.threshold_signature.threshold_sign(&share_signs)?;
         if resp.stage.step == 4 {
             info!(
@@ -710,7 +728,6 @@ impl VabaCore {
     // return false if validate message fail
     fn handle_done_message(&self, done: &DoneMessage) -> Result<bool> {
         let proof_value = ProofValue {
-            id: done.node_id,
             stage: Stage {
                 view: done.view,
                 step: 4,
@@ -747,7 +764,7 @@ impl VabaCore {
         let step = stage.step;
         let view = stage.view;
         let message_id = promote.value.message_id;
-        let from = promote.node_id;
+        let from = promote.value.node_id;
 
         let signature = if let Some(signature) = &promote.proof {
             signature
@@ -764,7 +781,6 @@ impl VabaCore {
         };
 
         let proof_value = ProofValue {
-            id: promote.node_id,
             // use last step signature as in proof
             stage: Stage {
                 view,
@@ -781,8 +797,8 @@ impl VabaCore {
         }
 
         error!(
-            "recv stage {:?} promote message {} from node {} validate fail",
-            stage, message_id, from
+            "recv stage {:?} promote message {:?} from node {} validate fail",
+            stage, promote.value, from
         );
 
         /*
@@ -806,26 +822,25 @@ impl VabaCore {
         if step == 1 {
             return;
         }
-        let from = promote.node_id;
+        let from = promote.value.node_id;
         let view = stage.view;
         let signature = if let Some(signature) = &promote.proof {
             signature
         } else {
             error!(
                 "step > 1 MUST with in proof of last step, message {} from {}",
-                promote.value.message_id, promote.node_id,
+                promote.value.message_id, from,
             );
             return;
         };
         let value_with_proof = PromoteValueWithProof {
-            value: promote.value.value.clone(),
-            message_id: promote.value.message_id.clone(),
+            value: promote.value.clone(),
             proof: signature.clone(),
         };
 
         info!(
             "node {} deliver step {} from node {} message_id {}",
-            self.node_id, step, promote.node_id, promote.value.message_id
+            self.node_id, step, from, promote.value.message_id
         );
 
         let mut deliver = self.deliver.lock().await;
@@ -978,6 +993,7 @@ impl VabaCore {
                 value: PromoteValue {
                     value: value.1,
                     message_id: value.0,
+                    node_id: self.node_id,
                 },
                 view: current_view,
             }
@@ -1063,11 +1079,10 @@ impl VabaCore {
         };
         let last_stage = Stage {
             view: promote.view,
-            step: step - 1,
+            step,
         };
         // calculate share sign of this node
         let proof_value = ProofValue {
-            id: self.node_id,
             // use last step signature as in proof
             stage: last_stage,
             value: promote.value.clone(),
@@ -1076,14 +1091,18 @@ impl VabaCore {
         let share_sign = self
             .threshold_signature
             .share_sign(self.node_id, &value_string)?;
-        promote_resp.share_signs.insert(self.node_id, share_sign);
+        let msg_hash = MessageHash {
+            node_id: self.node_id,
+            message_id: promote.value.message_id,
+            view: promote.view,
+        };
+        promote_resp.share_signs.insert(msg_hash, share_sign);
 
         let message = PromoteMessage {
             stage: Stage {
                 step,
                 view: promote.view,
             },
-            node_id: self.node_id,
             value: promote.value.clone(),
             proof: promote.proof.clone(),
         };
@@ -1095,7 +1114,6 @@ impl VabaCore {
             }
             self.send("promote", &json, node_id, address).await?;
         }
-        //self.promote_state = PromoteState::WaitAck(promote_resp);
         Ok(PromoteState::WaitAck(promote_resp))
     }
 }
@@ -1107,5 +1125,106 @@ impl DeliverValue {
             lock: None,
             commit: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use anyhow::Result;
+    use threshold_crypto::{Signature, SignatureShare};
+
+    use crate::{
+        base::{NodeId, Step},
+        core::{PromoteData, PromoteValue, ProofValue, Stage},
+        crypto::ThresholdSignatureScheme,
+    };
+
+    #[test]
+    fn test_4stage_promote() -> Result<()> {
+        // first create nodes and threshold signature
+        let node_ids: Vec<NodeId> = vec![0, 1, 2, 4];
+        let faulty = node_ids.len() / 3;
+        let threshold = node_ids.len() - faulty - 1;
+        let threshold_signature = ThresholdSignatureScheme::new(threshold - 1, &node_ids);
+
+        let mut value = 0;
+        let mut view = 1;
+
+        // iterator node ids, make each of them as a view promoter
+        for i in &node_ids {
+            let promoter = *i as NodeId;
+            // each view step=1's in proof is None
+            let mut in_proof: Option<Signature> = None;
+
+            // create promote value and proof(which is None in view=1 and step=1)
+            let promote_value = PromoteValue {
+                node_id: promoter,
+                value: value.to_string(),
+                message_id: value,
+            };
+
+            // the 4 step promote
+            for step in 1..5 {
+                println!(
+                    "run view: {}, step: {}, promoter: {}, value: {}",
+                    view, step, promoter, value
+                );
+
+                // if there is proof of last step, validate it
+                if let Some(in_proof) = &in_proof {
+                    // in proof is not None only when step > 1
+                    assert!(step > 1);
+
+                    // validate the in proof of last step
+                    let proof_value = ProofValue {
+                        stage: Stage {
+                            step: step - 1 as Step,
+                            view,
+                        },
+                        value: promote_value.clone(),
+                    };
+                    let json = serde_json::to_string(&proof_value)?;
+
+                    assert!(threshold_signature.threshold_validate(&json, in_proof));
+                } else {
+                    // in proof is None only when step=1
+                    assert!(step == 1);
+                }
+
+                // validate last step promote value success,
+                // now each node generate their share signature of this step
+
+                // proof value of this step
+                let proof_value = ProofValue {
+                    stage: Stage {
+                        step: step as Step,
+                        view,
+                    },
+                    value: promote_value.clone(),
+                };
+                let json = serde_json::to_string(&proof_value)?;
+                let mut share_signs: Vec<(NodeId, SignatureShare)> = Vec::new();
+                for i in &node_ids {
+                    // each node generate their share signature of this step
+                    let id = *i;
+                    let share_sign = threshold_signature.share_sign(id, &json)?;
+                    assert!(threshold_signature.share_validate(id, &json, &share_sign));
+                    share_signs.push((id, share_sign));
+
+                    // collect enough share signature, create threshold signature as in proof for the next step
+                    if share_signs.len() == threshold {
+                        // save the in proof for the next step
+                        in_proof = Some(threshold_signature.threshold_sign(&share_signs)?);
+                    }
+                }
+            }
+
+            // move to the next view and new promote value
+            view += 1;
+            value += 1;
+        }
+        Ok(())
     }
 }

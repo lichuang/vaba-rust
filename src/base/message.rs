@@ -47,8 +47,7 @@ pub struct ProposalMessageResp {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PromoteMessage {
-    pub node_id: NodeId,
-
+    //pub from: NodeId,
     pub stage: Stage,
 
     pub value: PromoteValue,
@@ -58,6 +57,7 @@ pub struct PromoteMessage {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AckMessage {
+    pub from: NodeId,
     pub node_id: NodeId,
     pub stage: Stage,
     pub message_id: MessageId,

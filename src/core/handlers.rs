@@ -61,7 +61,7 @@ pub async fn promote(req: Json<PromoteMessage>) -> actix_web::Result<impl Respon
 
     info!(
         "node {} recv promote message: {:?} from node {}",
-        app.node_id, message.value.message_id, message.node_id
+        app.node_id, message.value.message_id, message.value.node_id
     );
     let message_id = message.value.message_id;
     let send_res = app.tx_api.send(Message::Promote(message));
@@ -82,7 +82,7 @@ pub async fn ack(req: Json<AckMessage>) -> actix_web::Result<impl Responder> {
 
     info!(
         "node {} recv ack message: {:?} from node {}",
-        app.node_id, message.message_id, message.node_id
+        app.node_id, message.message_id, message.from
     );
     let message_id = message.message_id;
     let send_res = app.tx_api.send(Message::Ack(message));
