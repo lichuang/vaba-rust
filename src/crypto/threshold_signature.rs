@@ -29,10 +29,14 @@ pub const SEED: [u8; 32] = [42; 32];
 
 impl ThresholdSignatureScheme {
     pub fn new(threshold: usize, node_ids: &[NodeId]) -> Self {
+        Self::with_seed(threshold, node_ids, SEED)
+    }
+
+    pub fn with_seed(threshold: usize, node_ids: &[NodeId], seed: [u8; 32]) -> Self {
         assert!(node_ids.len() >= threshold);
 
         //let mut rng = rand::thread_rng();
-        let mut rng = StdRng::from_seed(SEED);
+        let mut rng = StdRng::from_seed(seed);
         let sk_set = SecretKeySet::random(threshold, &mut rng);
         let pk_set = sk_set.public_keys();
 
@@ -112,6 +116,36 @@ mod tests {
     use threshold_crypto::SignatureShare;
 
     use super::{NodeId, ThresholdSignatureScheme};
+
+    #[test]
+    fn test_different_threshold_signature_scheme() -> Result<()> {
+        let threshold = 3;
+
+        // create two different threshold_signature
+        let seed1: [u8; 32] = [11; 32];
+        let node_ids1 = vec![0, 1, 2, 3, 4];
+        let threshold_signature1 =
+            ThresholdSignatureScheme::with_seed(threshold, &node_ids1, seed1);
+
+        let seed2: [u8; 32] = [22; 32];
+        let node_ids2 = vec![1, 2, 3, 4, 5];
+        let threshold_signature2 =
+            ThresholdSignatureScheme::with_seed(threshold, &node_ids2, seed2);
+
+        let message = "hello world".to_string();
+
+        // generate share signs of threshold_signature1
+        let mut signature_shares: Vec<(NodeId, SignatureShare)> = Vec::new();
+        for id in node_ids1 {
+            signature_shares.push((id, threshold_signature1.share_sign(id, &message)?));
+        }
+        // must validate fail in threshold_signature2
+        for (i, share_sign) in &signature_shares {
+            assert!(!threshold_signature2.share_validate(*i as NodeId, &message, share_sign));
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn test_threshold_signature_scheme() -> Result<()> {
