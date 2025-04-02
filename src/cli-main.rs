@@ -57,7 +57,7 @@ impl NodeClient {
 
     pub async fn main(mut self) -> anyhow::Result<()> {
         while let Some(value) = self.rx_api.recv().await {
-            println!("recv value: {:?} to {:?}", value.json, self.uri);
+            //println!("recv value: {:?} to {:?}", value.json, self.uri);
 
             let resp = self
                 .http_client
@@ -106,6 +106,10 @@ async fn main() -> anyhow::Result<()> {
             nodes.insert(id, node_handle);
         }
     }
+    if nodes.len() <= 3 {
+        println!("expected number of node id > 3, actual {}", nodes.len());
+        return Ok(());
+    }
 
     let faulty = nodes.len() / 3;
     let threshold = nodes.len() - faulty;
@@ -124,20 +128,21 @@ async fn main() -> anyhow::Result<()> {
         let json = serde_json::to_string(&msg)?;
 
         let mut rx_vec = Vec::with_capacity(nodes.len());
-        for (_id, node) in nodes.iter() {
+        for (id, node) in nodes.iter() {
             let (sender, rx) = oneshot::channel::<()>();
             let value = NodeValue {
                 json: json.clone(),
                 sender,
             };
             let _ = node.tx_api.send(value);
-            rx_vec.push(rx);
+            rx_vec.push((id, rx));
             //println!("recv from node {}", id);
         }
 
         let mut n = 0;
-        for rx in rx_vec {
+        for (id, rx) in rx_vec {
             let _v = rx.await?;
+            println!("recv proposal value {} resp from node {}", i, id);
             n += 1;
             if n >= threshold {
                 break;
@@ -149,12 +154,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn parse_to_json(input: &str) -> serde_json::Result<Value> {
-    // 移除首尾的 `{` 和 `}`
     let trimmed = input.trim_matches(|c| c == '{' || c == '}');
 
-    // 按 `;` 分割键值对
     let pairs: Vec<&str> = trimmed.split(';').collect();
-    // 构建 JSON 对象
     let mut json_map = serde_json::Map::new();
     for pair in pairs {
         let parts: Vec<&str> = pair.split(':').collect();
@@ -163,7 +165,6 @@ fn parse_to_json(input: &str) -> serde_json::Result<Value> {
             let ip = parts[1];
             let port = parts[2];
 
-            // 组合 IP 和端口
             let address = format!("{}:{}", ip, port);
             json_map.insert(key.to_string(), Value::String(address));
         }

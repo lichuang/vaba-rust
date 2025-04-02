@@ -82,7 +82,7 @@ enum PromoteState {
     ViewChange(MessageId, View, NodeId),
 
     // wait view change
-    WaitViewChange(MessageId, View, BTreeSet<NodeId>),
+    WaitViewChange(BTreeSet<NodeId>),
 }
 
 struct DeliverValue {
@@ -475,6 +475,21 @@ impl VabaCore {
                 }
             }
             Message::ViewChange(view_change) => {
+                info!(
+                    "recv view-change {:?} from node {}",
+                    view_change, view_change.node_id
+                );
+                // update wait view-change set
+                let recv_view_change_counter = if let PromoteState::WaitViewChange(wait_set) =
+                    &mut self.promote_state
+                {
+                    wait_set.insert(view_change.node_id);
+                    wait_set.len()
+                } else {
+                    info!("node {} recv view-change {:?} from node {}, but not in wait-view-change state", self.node_id, view_change, view_change.node_id);
+                    return Ok(());
+                };
+
                 let view = view_change.view;
                 let lock = &view_change.lock;
                 let key = &view_change.key;
@@ -497,6 +512,7 @@ impl VabaCore {
                                     commit.value.message_id, e
                                 );
                             }
+                            info!("response message {} to client", commit.value.message_id);
                         } else {
                             error!("cannot find channel of message {}", commit.value.message_id);
                         }
@@ -518,12 +534,18 @@ impl VabaCore {
                         self.state.key = Some(new_key);
                     }
                 }
+
+                // if recv threshold view-change msg, move to the next view
+                if recv_view_change_counter >= self.threshold - 1 {
+                    self.state.current += 1;
+                    self.promote_state = PromoteState::Init;
+                }
             }
         }
         Ok(())
     }
 
-    // return the new key data, None if no update
+    // decide commit data
     fn decide_commit(
         &self,
         view_change: &ViewChange,
@@ -576,7 +598,7 @@ impl VabaCore {
             // receive older promote value, ignore it
             if view <= state_view {
                 info!(
-                    "recv view {} view-change key data, older than key view {}",
+                    "recv view {} view-change key data, not newer than key view {}",
                     view, state_view
                 );
                 return Ok(None);
@@ -615,7 +637,7 @@ impl VabaCore {
             // receive older promote value, ignore it
             if view <= lock_view {
                 info!(
-                    "recv view {} view-change lock data, older than lock {}",
+                    "recv view {} view-change lock data, not newer than lock {}",
                     view, lock_view
                 );
                 return Ok(None);
@@ -629,7 +651,7 @@ impl VabaCore {
             value: value.clone(),
         };
         let json = serde_json::to_string(&proof_value)?;
-        if self.threshold_signature.threshold_validate(&json, proof) {
+        if !self.threshold_signature.threshold_validate(&json, proof) {
             error!("view-change lock from node {} validate fail", node_id);
             Ok(None)
         } else {
@@ -1043,7 +1065,7 @@ impl VabaCore {
                     self.promote_state = self.done(view, value, signature).await?;
                     break;
                 }
-                PromoteState::ElectionLeader(coin_share_set) => {
+                PromoteState::ElectionLeader(_coin_share_set) => {
                     break;
                 }
                 PromoteState::ViewChange(message_id, view, leader_id) => {
@@ -1052,11 +1074,14 @@ impl VabaCore {
                         .await?;
                     if !ok {
                         // move to the next view
-                        self.state.current += 1;
-                        self.promote_state = PromoteState::Init;
+                        //self.state.current += 1;
+                        //self.promote_state = PromoteState::Init;
+                        info!(
+                            "cannot find leader id {} view {} deliver data, wait...",
+                            leader_id, view
+                        );
                     } else {
-                        self.promote_state =
-                            PromoteState::WaitViewChange(*message_id, *view, BTreeSet::new());
+                        self.promote_state = PromoteState::WaitViewChange(BTreeSet::new());
                     }
                     break;
                 }
@@ -1110,52 +1135,24 @@ impl VabaCore {
     }
 
     async fn select_promote_data(&self) -> Option<PromoteData> {
-        let promote_value = if let Some((last_view, proof, promote)) = &self.state.key {
-            let proof = if let Some(value_with_proof) = self.decide_values.get(last_view) {
-                Some(value_with_proof.proof.clone())
-            } else {
-                error!("last view is {} but not found delivered value", last_view);
-                assert!(false);
+        let value = {
+            let mut proposal_values = self.proposal_values.lock().await;
+            if proposal_values.is_empty() {
+                // if there is no proposal data, return None and wait client proposal data
                 return None;
-            };
-            PromoteData {
-                value: promote.clone(),
-                proof,
-                view: *last_view,
             }
-        } else {
-            let current_view = self.state.current;
-            let last_view = current_view - 1;
-            let value = {
-                let mut proposal_values = self.proposal_values.lock().await;
-                if proposal_values.is_empty() {
-                    return None;
-                }
-                proposal_values.remove(0)
-            };
-
-            let proof = if current_view == 1 {
-                None
-            } else if let Some(value_with_proof) = self.decide_values.get(&last_view) {
-                Some(value_with_proof.proof.clone())
-            } else {
-                error!("last view is {} but not found delivered value", last_view);
-                assert!(false);
-                return None;
-            };
-
-            PromoteData {
-                proof,
-                value: PromoteValue {
-                    value: value.1,
-                    message_id: value.0,
-                    node_id: self.node_id,
-                },
-                view: current_view,
-            }
+            proposal_values.remove(0)
         };
 
-        return Some(promote_value);
+        Some(PromoteData {
+            proof: None,
+            value: PromoteValue {
+                value: value.1,
+                message_id: value.0,
+                node_id: self.node_id,
+            },
+            view: self.state.current,
+        })
     }
 
     // return false if no input values

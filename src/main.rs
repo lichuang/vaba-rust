@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use base::NodeId;
 use chrono::Local;
 use clap::Parser;
-use log::info;
 use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -41,6 +40,10 @@ async fn main() -> anyhow::Result<()> {
 
     if !nodes.contains_key(&args.id) {
         println!("node id {:?} not contain in the node map", args.id);
+        return Ok(());
+    }
+    if nodes.len() <= 3 {
+        println!("expected number of node id > 3, actual {}", nodes.len());
         return Ok(());
     }
     setup_logger(args.id).unwrap();
