@@ -2,7 +2,7 @@ use threshold_crypto::{Signature, SignatureShare};
 use tokio::sync::oneshot;
 
 use crate::{
-    core::{PromoteValue, PromoteValueWithProof, Proof, Stage},
+    core::{Metrics, PromoteValue, PromoteValueWithProof, Proof, Stage},
     crypto::CoinShare,
 };
 
@@ -25,6 +25,8 @@ pub enum Message {
     Share(ShareMessage),
 
     ViewChange(ViewChange),
+
+    Metrics(MetricsMessage),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -126,4 +128,13 @@ pub struct ViewChange {
     pub lock: Option<PromoteValueWithProof>,
 
     pub commit: Option<PromoteValueWithProof>,
+}
+
+pub struct MetricsMessage {
+    pub sender: oneshot::Sender<MetricsMessageResp>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct MetricsMessageResp {
+    pub metrics: Metrics,
 }

@@ -48,8 +48,9 @@ impl Vaba {
                 //.wrap(Logger::default())
                 //.wrap(Logger::new("%a %{User-Agent}i"))
                 .wrap(middleware::Compress::default())
-                // client proposal data RPC
+                // client RPC
                 .service(handlers::proposal)
+                .service(handlers::metrics)
                 // node internal RPC
                 .service(handlers::promote)
                 .service(handlers::ack)

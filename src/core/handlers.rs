@@ -1,13 +1,14 @@
-use actix_web::{post, web::Json, Responder};
+use actix_web::{get, post, web::Json, Responder};
 use log::{error, info};
 use tokio::sync::oneshot;
 
 use crate::{
     base::{
-        AckMessage, ClientProposalMessage, DoneMessage, Message, PromoteMessage, ProposalMessage,
-        ProposalMessageResp, ShareMessage, SkipMessage, SkipShareMessage, ViewChange,
+        AckMessage, ClientProposalMessage, DoneMessage, Message, MetricsMessage,
+        MetricsMessageResp, PromoteMessage, ProposalMessage, ProposalMessageResp, ShareMessage,
+        SkipMessage, SkipShareMessage, ViewChange,
     },
-    core::vaba::Vaba,
+    core::{vaba::Vaba, Metrics},
 };
 
 #[post("/proposal")]
@@ -201,4 +202,35 @@ pub async fn view_change(req: Json<ViewChange>) -> actix_web::Result<impl Respon
     }
 
     Ok(Json(()))
+}
+
+#[get("/metrics")]
+pub async fn metrics() -> actix_web::Result<impl Responder> {
+    let app = Vaba::get_instance();
+
+    let (tx, rx) = oneshot::channel::<MetricsMessageResp>();
+    let message = MetricsMessage { sender: tx };
+
+    info!("node {} recv metrics message", app.node_id);
+    let send_res = app.tx_api.send(Message::Metrics(message));
+    if let Err(e) = send_res {
+        error!(
+            "send to node {} core metrics message error {:?}",
+            app.node_id, e
+        );
+    }
+
+    let resp = rx.await;
+    let metrics = match resp {
+        Ok(resp) => resp.metrics,
+        Err(e) => {
+            error!(
+                "recv resp from node {} core metrics error {:?}",
+                app.node_id, e
+            );
+            Metrics::default()
+        }
+    };
+
+    Ok(Json(metrics))
 }

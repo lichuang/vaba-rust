@@ -1,6 +1,7 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Metrics {
     recv_proposal: AtomicU64,
 
@@ -11,6 +12,21 @@ pub struct Metrics {
     send_skip: AtomicU64,
     send_share: AtomicU64,
     send_view_change: AtomicU64,
+}
+
+impl Clone for Metrics {
+    fn clone(&self) -> Self {
+        Metrics {
+            recv_proposal: AtomicU64::new(self.recv_proposal.load(Ordering::Relaxed)),
+            send_promote: AtomicU64::new(self.send_promote.load(Ordering::Relaxed)),
+            send_ack: AtomicU64::new(self.send_ack.load(Ordering::Relaxed)),
+            send_done: AtomicU64::new(self.send_done.load(Ordering::Relaxed)),
+            send_skip_share: AtomicU64::new(self.send_skip_share.load(Ordering::Relaxed)),
+            send_skip: AtomicU64::new(self.send_skip.load(Ordering::Relaxed)),
+            send_share: AtomicU64::new(self.send_share.load(Ordering::Relaxed)),
+            send_view_change: AtomicU64::new(self.send_view_change.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl Metrics {

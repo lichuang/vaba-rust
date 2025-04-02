@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use clap::Parser;
-use log::error;
 use reqwest::Client;
 use serde_json::Value;
 use tokio::spawn;
@@ -93,17 +93,20 @@ async fn main() -> anyhow::Result<()> {
     let json = parse_to_json(&args.cluster).unwrap();
 
     let mut nodes: BTreeMap<u32, NodeHandle> = BTreeMap::new();
+    let mut nodes_address: BTreeMap<u32, String> = BTreeMap::new();
     if let Value::Object(map) = json {
         for (id, value) in map {
             let id = id.parse::<u32>().unwrap();
             //nodes.insert(id, value.as_str().unwrap().to_string());
             let (tx_api, rx_api) = unbounded_channel();
-            let node = NodeClient::new(id, value.as_str().unwrap().to_string(), rx_api);
+            let address = value.as_str().unwrap().to_string();
+            let node = NodeClient::new(id, address.clone(), rx_api);
 
             let handle = spawn(node.main());
             let node_handle = NodeHandle { tx_api, handle };
 
             nodes.insert(id, node_handle);
+            nodes_address.insert(id, address);
         }
     }
     if nodes.len() <= 3 {
@@ -120,9 +123,12 @@ async fn main() -> anyhow::Result<()> {
         threshold
     );
 
+    let mut total_time = 0;
     for i in 0..args.number {
+        println!("proposal value {}", i);
+        let start = Instant::now();
         let msg = ProposalMessage {
-            message_id: i as u64,
+            message_id: start.elapsed().as_secs() as u64,
             value: i.to_string(),
         };
         let json = serde_json::to_string(&msg)?;
@@ -136,21 +142,61 @@ async fn main() -> anyhow::Result<()> {
             };
             let _ = node.tx_api.send(value);
             rx_vec.push((id, rx));
-            //println!("recv from node {}", id);
         }
 
         let mut n = 0;
         for (id, rx) in rx_vec {
-            let _v = rx.await?;
+            //rx.try_recv()
+            let v = rx.await;
             println!("recv proposal value {} resp from node {}", i, id);
+            if let Err(e) = v {
+                println!("recv resp from node {} error {:?}", id, e);
+            }
             n += 1;
             if n >= threshold {
                 break;
             }
         }
+
+        let time = Instant::now().duration_since(start).as_millis();
+        total_time += time;
     }
 
+    let http_client = Client::new();
+    let (id, address) = nodes_address.first_key_value().unwrap();
+    let uri = format!("http://{}/metrics", address);
+
+    let resp = http_client.get(&uri).send().await;
+    let metrics: Metrics = match resp {
+        Err(e) => {
+            println!("send data to node {}/{} error: {:?}", id, address, e);
+            return Ok(());
+        }
+        Ok(resp) => serde_json::from_str(&resp.text().await?)?,
+    };
+
+    println!(
+        "total count: {}, total time: {}, avg time: {}",
+        args.number,
+        total_time,
+        total_time as f32 / args.number as f32
+    );
+    println!("node {} metrics: {:?}", id, metrics);
+
     Ok(())
+}
+
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Metrics {
+    recv_proposal: u64,
+
+    send_promote: u64,
+    send_ack: u64,
+    send_done: u64,
+    send_skip_share: u64,
+    send_skip: u64,
+    send_share: u64,
+    send_view_change: u64,
 }
 
 fn parse_to_json(input: &str) -> serde_json::Result<Value> {

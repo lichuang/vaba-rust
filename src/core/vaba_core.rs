@@ -14,6 +14,7 @@ use crate::base::AckMessage;
 use crate::base::DoneMessage;
 use crate::base::Message;
 use crate::base::MessageId;
+use crate::base::MetricsMessageResp;
 use crate::base::NodeId;
 use crate::base::PromoteMessage;
 use crate::base::ProposalMessageResp;
@@ -210,10 +211,6 @@ impl VabaCore {
             threshold_signature: ThresholdSignatureScheme::new(threshold - 1, &node_ids),
             threshold_coin_tossing: ThresholdCoinTossing::new(faulty, &node_ids),
         }
-    }
-
-    pub fn stop(&self) -> Result<()> {
-        Ok(())
     }
 
     pub async fn main(mut self) -> Result<()> {
@@ -536,9 +533,19 @@ impl VabaCore {
                 }
 
                 // if recv threshold view-change msg, move to the next view
+                // "- 1" because need to exclude self node
                 if recv_view_change_counter >= self.threshold - 1 {
                     self.state.current += 1;
                     self.promote_state = PromoteState::Init;
+                }
+            }
+            Message::Metrics(metrics) => {
+                let resp = MetricsMessageResp {
+                    metrics: self.metrics.clone(),
+                };
+
+                if let Err(e) = metrics.sender.send(resp) {
+                    error!("resp metrics message to client error {:?}", e);
                 }
             }
         }
@@ -773,8 +780,8 @@ impl VabaCore {
 
     async fn handle_ack_message(&mut self, resp: AckMessage) -> Result<()> {
         // ack only send to the promote data node
-        assert!(resp.node_id == self.node_id);
-        assert!(resp.from != self.node_id);
+        //assert!(resp.node_id == self.node_id);
+        //assert!(resp.from != self.node_id);
 
         let wait_promote_ack = if let PromoteState::Ack(wait) = &mut self.promote_state {
             wait
@@ -1236,6 +1243,25 @@ impl VabaCore {
         Ok(PromoteState::WaitSkip(*view))
     }
 
+    /*
+        async fn init_view_deliver(&self, view: View) -> Result<()> {
+            let mut deliver = self.deliver.lock().await;
+            let node_id = self.node_id;
+
+            let node_view_deliver = if let Some(node_view_deliver) = deliver.get_mut(&node_id) {
+                node_view_deliver
+            } else {
+                deliver.insert(node_id, BTreeMap::new());
+                deliver.get_mut(&node_id).unwrap()
+            };
+
+            if node_view_deliver.contains_key(&view) {
+                node_view_deliver.insert(view, DeliverValue::new());
+            }
+
+            Ok(())
+        }
+    */
     async fn promote(&self, step: Step, promote: PromoteData) -> Result<PromoteState> {
         // node can only promote it's own value
         assert!(promote.value.node_id == self.node_id);
@@ -1282,9 +1308,12 @@ impl VabaCore {
             message.stage, message
         );
         for (node_id, address) in &self.nodes {
+            /*
             if *node_id == self.node_id {
+                self.init_view_deliver(promote.view).await?;
                 continue;
             }
+            */
             self.send("promote", &json, node_id, address).await?;
         }
         Ok(PromoteState::Ack(ack))
