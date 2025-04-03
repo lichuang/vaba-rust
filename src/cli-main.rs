@@ -16,7 +16,7 @@ type MessageId = u64;
 #[command(author, version, about, long_about = None)]
 struct Args {
     // number of values
-    #[arg(short, long, default_value = "100")]
+    #[arg(short, long, default_value = "10")]
     number: u32,
 
     // cluster config, [id:address]+

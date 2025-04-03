@@ -528,9 +528,8 @@ impl VabaCore {
                 }
 
                 // if recv threshold view-change msg, move to the next view
-                // "- 1" because need to exclude self node
-                if recv_view_change_counter >= self.threshold - 1 {
-                    self.state.current += 1;
+                if recv_view_change_counter >= self.threshold {
+                    self.state.current = view + 1;
                     self.promote_state = PromoteState::Init;
                 }
             }
@@ -1109,10 +1108,11 @@ impl VabaCore {
         };
         let json = serde_json::to_string(&msg)?;
         for (node_id, address) in &self.nodes {
+            /*
             if *node_id == self.node_id {
                 continue;
             }
-
+            */
             self.send("view-change", &json, node_id, address).await?;
         }
         Ok(true)
