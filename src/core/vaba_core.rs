@@ -68,13 +68,13 @@ enum PromoteState {
     Promote(PromoteData),
 
     // wait promote with 2f + 1 ack return
-    Ack(Ack),
+    WaitAck(Ack),
 
     // promote success, notify all parties DONE
     Done(View, PromoteValue, Signature),
 
     // wait until skip[view] is true
-    WaitSkip(View),
+    WaitSkip,
 
     // election leader
     ElectionLeader(BTreeMap<NodeId, SignatureShare>),
@@ -117,9 +117,6 @@ pub struct VabaCore {
     //proposal_sender: Arc<Mutex<BTreeMap<MessageId, oneshot::Sender<ProposalMessageResp>>>>,
     proposal_sender: BTreeMap<MessageId, oneshot::Sender<ProposalMessageResp>>,
 
-    // save all the message ids have seen
-    seen: BTreeSet<MessageId>,
-
     metrics: Metrics,
 
     // node id -> {view, DeliverValue}
@@ -129,10 +126,7 @@ pub struct VabaCore {
     skip: BTreeSet<View>,
 
     // number of view send `DONE` message
-    broadcast_done: BTreeMap<View, u16>,
-
-    // number of view has recv validate `SKIP-SHARE` message
-    broadcast_skip: BTreeMap<View, u16>,
+    recv_done_counter: BTreeMap<View, u16>,
 
     // if recv `DONE` message id  in view from node id
     recv_done: BTreeSet<MessageHash>,
@@ -194,12 +188,10 @@ impl VabaCore {
             nodes,
             proposal_values: Arc::new(Mutex::new(Vec::new())),
             proposal_sender: BTreeMap::new(),
-            seen: BTreeSet::new(),
             metrics: Metrics::new(),
             deliver: Arc::new(Mutex::new(BTreeMap::new())),
             skip: BTreeSet::new(),
-            broadcast_done: BTreeMap::new(),
-            broadcast_skip: BTreeMap::new(),
+            recv_done_counter: BTreeMap::new(),
             send_skip_share: BTreeSet::new(),
             send_skip: BTreeSet::new(),
             recv_done: BTreeSet::new(),
@@ -270,7 +262,7 @@ impl VabaCore {
                 }
 
                 // validate the message
-                let validate = self.handle_done_message(&done)?;
+                let validate = self.validate_done_message(&done)?;
                 if !validate {
                     error!(
                         "recv done msg {} from node {} validate fail",
@@ -281,14 +273,14 @@ impl VabaCore {
 
                 self.recv_done.insert(msg_hash);
 
-                // update view done counter
-                self.broadcast_done
+                // update recv view done counter
+                self.recv_done_counter
                     .entry(done.view)
                     .and_modify(|done| *done += 1)
                     .or_insert(1);
 
                 // check if has reach 2f+1 validate
-                if self.threshold > *self.broadcast_done.get(&done.view).unwrap() as usize {
+                if self.threshold > *self.recv_done_counter.get(&done.view).unwrap() as usize {
                     return Ok(());
                 }
                 // check if this view skip-share message has been send before
@@ -377,10 +369,11 @@ impl VabaCore {
                 };
                 let msg_str = serde_json::to_string(&skip_message)?;
                 for (node_id, address) in &self.nodes {
+                    /*
                     if *node_id == self.node_id {
                         continue;
                     }
-
+                    */
                     self.send("skip", &msg_str, node_id, address).await?;
                 }
 
@@ -388,8 +381,7 @@ impl VabaCore {
                 self.send_skip.insert(skip_share.view);
                 // mark skip[view] is true
                 self.skip.insert(skip_share.view);
-                // stop receiving promote message
-                self.stop = true;
+
                 // change to `ElectionLeader` state
                 self.send_share_message(skip_share.view, skip_share.message_id)
                     .await?;
@@ -417,6 +409,8 @@ impl VabaCore {
 
                 // mark skip[view] is true
                 self.skip.insert(view);
+                // stop receiving promote message
+                self.stop = true;
 
                 if !self.send_skip.contains(&view) {
                     self.send_skip.insert(view);
@@ -430,10 +424,11 @@ impl VabaCore {
                     };
                     let msg_str = serde_json::to_string(&skip_message)?;
                     for (node_id, address) in &self.nodes {
+                        /*
                         if *node_id == self.node_id {
                             continue;
                         }
-
+                        */
                         self.send("skip", &msg_str, node_id, address).await?;
                     }
                 }
@@ -465,7 +460,7 @@ impl VabaCore {
                     let leader_id = coin_tossing.coin_toss(&msg, &share_signs)?;
                     // save view leader id
                     self.view_leader.insert(share.view, leader_id);
-                    info!("eleect node {} as view {} leader", leader_id, share.view);
+                    info!("elect node {} as view {} leader", leader_id, share.view);
                     // change state to VIEW-CHANGE
                     self.promote_state =
                         PromoteState::ViewChange(share.message_id, share.view, leader_id);
@@ -681,9 +676,11 @@ impl VabaCore {
         let json = serde_json::to_string(&msg)?;
 
         for (node_id, address) in &self.nodes {
+            /*
             if *node_id == self.node_id {
                 continue;
             }
+            */
 
             self.send("share", &json, node_id, address).await?;
         }
@@ -721,17 +718,7 @@ impl VabaCore {
         let stage = &promote.stage;
         let step = stage.step;
         let view = stage.view;
-        /*
-        // check if handled this message id
-        if self.seen.contains(&message_id) {
-            info!(
-                "node {} has seen message {} before",
-                self.node_id, message_id
-            );
-            return Ok(());
-        }
-        */
-        if !self.external_provable_broadcast_validate(&promote)? {
+        if !self.external_broadcast_validation(&promote)? {
             error!(
                 "node {} external validate stage {:?} message {} fail",
                 self.node_id, stage, message_id
@@ -739,23 +726,15 @@ impl VabaCore {
             return Ok(());
         }
 
-        // save message id
-        //self.seen.insert(message_id);
-
         // calculate share sign of this node
         let proof_value = ProofValue {
-            stage: Stage { view: view, step },
+            stage: Stage { view, step },
             value: promote.value.clone(),
         };
         let value_string = serde_json::to_string(&proof_value)?;
         let share_sign = self
             .threshold_signature
             .share_sign(self.node_id, &value_string)?;
-        /*
-        assert!(self
-            .threshold_signature
-            .share_validate(self.node_id, &value_string, &share_sign));
-        */
 
         info!(
             "node {} ack node {} proof_value: {}",
@@ -783,7 +762,7 @@ impl VabaCore {
         //assert!(resp.node_id == self.node_id);
         //assert!(resp.from != self.node_id);
 
-        let wait_promote_ack = if let PromoteState::Ack(wait) = &mut self.promote_state {
+        let wait_promote_ack = if let PromoteState::WaitAck(wait) = &mut self.promote_state {
             wait
         } else {
             error!(
@@ -842,7 +821,6 @@ impl VabaCore {
             .threshold_signature
             .share_validate(resp.from, &json, &resp.share_sign)
         {
-            info!("validate node {} ack proof_value {}", resp.from, json);
             error!(
                 "recv stage {:?} ack messgae {} from {} but validate fail",
                 resp.stage, resp.message_id, resp.from
@@ -910,7 +888,7 @@ impl VabaCore {
     }
 
     // return false if validate message fail
-    fn handle_done_message(&self, done: &DoneMessage) -> Result<bool> {
+    fn validate_done_message(&self, done: &DoneMessage) -> Result<bool> {
         let proof_value = ProofValue {
             stage: Stage {
                 view: done.view,
@@ -943,7 +921,7 @@ impl VabaCore {
         ))
     }
 
-    fn external_provable_broadcast_validate(&self, promote: &PromoteMessage) -> Result<bool> {
+    fn external_broadcast_validation(&self, promote: &PromoteMessage) -> Result<bool> {
         let stage = &promote.stage;
         let step = stage.step;
         let view = stage.view;
@@ -986,15 +964,11 @@ impl VabaCore {
             stage, proof_value, from
         );
 
-        /*
         if let Some(lock) = self.state.lock {
             Ok(view >= lock)
         } else {
             Ok(true)
         }
-        */
-
-        Ok(false)
     }
 
     async fn deliver(&self, promote: &PromoteMessage) {
@@ -1029,14 +1003,14 @@ impl VabaCore {
         );
 
         let mut deliver = self.deliver.lock().await;
-        let mut node_view_deliver = if let Some(node_view_deliver) = deliver.get_mut(&from) {
+        let node_view_deliver = if let Some(node_view_deliver) = deliver.get_mut(&from) {
             node_view_deliver
         } else {
             deliver.insert(from, BTreeMap::new());
             deliver.get_mut(&from).unwrap()
         };
 
-        let mut deliver = if let Some(view_deliver) = node_view_deliver.get_mut(&view) {
+        let deliver = if let Some(view_deliver) = node_view_deliver.get_mut(&view) {
             view_deliver
         } else {
             node_view_deliver.insert(view, DeliverValue::new());
@@ -1058,11 +1032,14 @@ impl VabaCore {
             let view_state = &self.promote_state;
             match view_state {
                 PromoteState::Init => {
+                    // start recv promote message
+                    self.stop = false;
                     // if there if no data to promote, break and wait proposal value
-                    if !self.init_promote().await? {
+                    if let Some(state) = self.init_promote().await {
+                        self.promote_state = state;
+                    } else {
                         break;
                     }
-                    self.stop = false;
                 }
                 PromoteState::Promote(data) => {
                     self.promote_state = self.promote(1, data.clone()).await?;
@@ -1162,17 +1139,16 @@ impl VabaCore {
         })
     }
 
-    // return false if no input values
-    async fn init_promote(&mut self) -> Result<bool> {
+    // return None if no input values
+    async fn init_promote(&self) -> Option<PromoteState> {
         if let Some(promopt_data) = self.select_promote_data().await {
             info!(
                 "node {} select promote data {:?} in view {}",
                 self.node_id, promopt_data, self.state.current
             );
-            self.promote_state = PromoteState::Promote(promopt_data);
-            Ok(true)
+            Some(PromoteState::Promote(promopt_data))
         } else {
-            Ok(false)
+            None
         }
     }
 
@@ -1235,38 +1211,21 @@ impl VabaCore {
         };
         let json = serde_json::to_string(&message)?;
         for (node_id, address) in &self.nodes {
+            /*
             if *node_id == self.node_id {
                 continue;
             }
+            */
             self.send("done", &json, node_id, address).await?;
         }
-        Ok(PromoteState::WaitSkip(*view))
+        Ok(PromoteState::WaitSkip)
     }
 
-    /*
-        async fn init_view_deliver(&self, view: View) -> Result<()> {
-            let mut deliver = self.deliver.lock().await;
-            let node_id = self.node_id;
-
-            let node_view_deliver = if let Some(node_view_deliver) = deliver.get_mut(&node_id) {
-                node_view_deliver
-            } else {
-                deliver.insert(node_id, BTreeMap::new());
-                deliver.get_mut(&node_id).unwrap()
-            };
-
-            if node_view_deliver.contains_key(&view) {
-                node_view_deliver.insert(view, DeliverValue::new());
-            }
-
-            Ok(())
-        }
-    */
     async fn promote(&self, step: Step, promote: PromoteData) -> Result<PromoteState> {
         // node can only promote it's own value
         assert!(promote.value.node_id == self.node_id);
 
-        let mut ack = Ack {
+        let ack = Ack {
             stage: Stage {
                 view: promote.view,
                 step,
@@ -1276,6 +1235,7 @@ impl VabaCore {
         };
 
         // calculate (view, step) value share sign of this node
+        /*
         let proof_value = ProofValue {
             stage: Stage {
                 view: promote.view,
@@ -1293,6 +1253,7 @@ impl VabaCore {
             view: promote.view,
         };
         ack.share_signs.insert(msg_hash, share_sign);
+        */
 
         let message = PromoteMessage {
             stage: Stage {
@@ -1316,7 +1277,7 @@ impl VabaCore {
             */
             self.send("promote", &json, node_id, address).await?;
         }
-        Ok(PromoteState::Ack(ack))
+        Ok(PromoteState::WaitAck(ack))
     }
 }
 

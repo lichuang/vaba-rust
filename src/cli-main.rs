@@ -175,12 +175,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(resp) => serde_json::from_str(&resp.text().await?)?,
     };
 
-    println!(
-        "total count: {}, total time: {}, avg time: {}",
-        args.number,
-        total_time,
-        total_time as f32 / args.number as f32
-    );
+    println!("total count: {}", args.number,);
     println!("node {} metrics: {:?}", id, metrics);
 
     Ok(())
