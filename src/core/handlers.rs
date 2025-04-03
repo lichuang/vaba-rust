@@ -5,8 +5,8 @@ use tokio::sync::oneshot;
 use crate::{
     base::{
         AckMessage, ClientProposalMessage, DoneMessage, Message, MetricsMessage,
-        MetricsMessageResp, PromoteMessage, ProposalMessage, ProposalMessageResp, ShareMessage,
-        SkipMessage, SkipShareMessage, ViewChange,
+        MetricsMessageResp, PromoteMessage, ProposalMessage, ProposalMessageResp, RespMessage,
+        ShareMessage, SkipMessage, SkipShareMessage, ViewChange,
     },
     core::{vaba::Vaba, Metrics},
 };
@@ -59,7 +59,14 @@ pub async fn proposal(req: Json<ClientProposalMessage>) -> actix_web::Result<imp
 pub async fn promote(req: Json<PromoteMessage>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
+    let idempotent_id = message.idempotent_id;
 
+    if app.has_handled(idempotent_id).await {
+        return Ok(Json(RespMessage {
+            id: idempotent_id,
+            node_id: app.node_id,
+        }));
+    }
     info!(
         "node {} recv promote message: {:?} from node {}",
         app.node_id, message.value.message_id, message.value.node_id
@@ -73,13 +80,24 @@ pub async fn promote(req: Json<PromoteMessage>) -> actix_web::Result<impl Respon
         );
     }
 
-    Ok(Json(()))
+    Ok(Json(RespMessage {
+        id: idempotent_id,
+        node_id: app.node_id,
+    }))
 }
 
 #[post("/ack")]
 pub async fn ack(req: Json<AckMessage>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
+    let idempotent_id = message.idempotent_id;
+
+    if app.has_handled(idempotent_id).await {
+        return Ok(Json(RespMessage {
+            id: idempotent_id,
+            node_id: app.node_id,
+        }));
+    }
 
     info!(
         "node {} recv ack message: {:?} from node {}",
@@ -96,13 +114,24 @@ pub async fn ack(req: Json<AckMessage>) -> actix_web::Result<impl Responder> {
         );
     }
 
-    Ok(Json(()))
+    Ok(Json(RespMessage {
+        id: idempotent_id,
+        node_id: app.node_id,
+    }))
 }
 
 #[post("/done")]
 pub async fn done(req: Json<DoneMessage>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
+    let idempotent_id = message.idempotent_id;
+
+    if app.has_handled(idempotent_id).await {
+        return Ok(Json(RespMessage {
+            id: idempotent_id,
+            node_id: app.node_id,
+        }));
+    }
 
     info!(
         "node {} recv done message: {:?} from node {}",
@@ -117,13 +146,24 @@ pub async fn done(req: Json<DoneMessage>) -> actix_web::Result<impl Responder> {
         );
     }
 
-    Ok(Json(()))
+    Ok(Json(RespMessage {
+        id: idempotent_id,
+        node_id: app.node_id,
+    }))
 }
 
 #[post("/skip-share")]
 pub async fn skip_share(req: Json<SkipShareMessage>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
+    let idempotent_id = message.idempotent_id;
+
+    if app.has_handled(idempotent_id).await {
+        return Ok(Json(RespMessage {
+            id: idempotent_id,
+            node_id: app.node_id,
+        }));
+    }
 
     info!(
         "node {} recv skip share message: {:?} from node {}",
@@ -138,17 +178,28 @@ pub async fn skip_share(req: Json<SkipShareMessage>) -> actix_web::Result<impl R
         );
     }
 
-    Ok(Json(()))
+    Ok(Json(RespMessage {
+        id: idempotent_id,
+        node_id: app.node_id,
+    }))
 }
 
 #[post("/skip")]
 pub async fn skip(req: Json<SkipMessage>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
+    let idempotent_id = message.idempotent_id;
+
+    if app.has_handled(idempotent_id).await {
+        return Ok(Json(RespMessage {
+            id: idempotent_id,
+            node_id: app.node_id,
+        }));
+    }
 
     info!(
         "node {} recv skip message: {:?} from {}",
-        app.node_id, message.message_id, message.node_id
+        app.node_id, idempotent_id, message.node_id
     );
     let message_id = message.message_id;
     let send_res = app.tx_api.send(Message::Skip(message));
@@ -159,13 +210,24 @@ pub async fn skip(req: Json<SkipMessage>) -> actix_web::Result<impl Responder> {
         );
     }
 
-    Ok(Json(()))
+    Ok(Json(RespMessage {
+        id: idempotent_id,
+        node_id: app.node_id,
+    }))
 }
 
 #[post("/share")]
 pub async fn share(req: Json<ShareMessage>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
+    let idempotent_id = message.idempotent_id;
+
+    if app.has_handled(idempotent_id).await {
+        return Ok(Json(RespMessage {
+            id: idempotent_id,
+            node_id: app.node_id,
+        }));
+    }
 
     info!(
         "node {} recv share message: {:?} from {}",
@@ -180,13 +242,24 @@ pub async fn share(req: Json<ShareMessage>) -> actix_web::Result<impl Responder>
         );
     }
 
-    Ok(Json(()))
+    Ok(Json(RespMessage {
+        id: idempotent_id,
+        node_id: app.node_id,
+    }))
 }
 
 #[post("/view-change")]
 pub async fn view_change(req: Json<ViewChange>) -> actix_web::Result<impl Responder> {
     let app = Vaba::get_instance();
     let message = req.into_inner();
+    let idempotent_id = message.idempotent_id;
+
+    if app.has_handled(idempotent_id).await {
+        return Ok(Json(RespMessage {
+            id: idempotent_id,
+            node_id: app.node_id,
+        }));
+    }
 
     info!(
         "node {} recv view-change message: {:?} from {}",
@@ -198,6 +271,27 @@ pub async fn view_change(req: Json<ViewChange>) -> actix_web::Result<impl Respon
         error!(
             "send to node {} core view-change message {} error {:?}",
             app.node_id, message_id, e
+        );
+    }
+
+    Ok(Json(RespMessage {
+        id: idempotent_id,
+        node_id: app.node_id,
+    }))
+}
+
+#[post("/response")]
+pub async fn response(req: Json<RespMessage>) -> actix_web::Result<impl Responder> {
+    let app = Vaba::get_instance();
+    let message = req.into_inner();
+    let id = message.id;
+
+    info!("node {} recv response message: {:?}", app.node_id, message);
+    let send_res = app.tx_api.send(Message::Response(message));
+    if let Err(e) = send_res {
+        error!(
+            "send to node {} core response message {} error {:?}",
+            app.node_id, id, e
         );
     }
 

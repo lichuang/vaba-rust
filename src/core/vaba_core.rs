@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::Utc;
 use log::error;
 use log::info;
 use reqwest::Client;
@@ -9,6 +11,7 @@ use threshold_crypto::Signature;
 use threshold_crypto::SignatureShare;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 
 use crate::base::AckMessage;
 use crate::base::DoneMessage;
@@ -18,6 +21,7 @@ use crate::base::MetricsMessageResp;
 use crate::base::NodeId;
 use crate::base::PromoteMessage;
 use crate::base::ProposalMessageResp;
+use crate::base::RespMessage;
 use crate::base::ShareMessage;
 use crate::base::SkipMessage;
 use crate::base::SkipShareMessage;
@@ -32,7 +36,9 @@ use anyhow::Result;
 use futures::FutureExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::snowflake_generator::SnowflakeGenerator;
 use super::Ack;
+use super::IdempotentId;
 use super::MessageHash;
 use super::Metrics;
 use super::PromoteData;
@@ -41,6 +47,8 @@ use super::PromoteValueWithProof;
 use super::ProofCoinShare;
 use super::ProofSkipShare;
 use super::ProofValue;
+
+const RESEND_INTERNAL_MS: u64 = 500;
 
 struct VabaState {
     // the highest view number for which the party ever received
@@ -90,6 +98,13 @@ struct DeliverValue {
     key: Option<PromoteValueWithProof>,
     lock: Option<PromoteValueWithProof>,
     commit: Option<PromoteValueWithProof>,
+}
+
+#[derive(Debug)]
+pub struct WaitRespMessage {
+    pub to: NodeId,
+    pub msg: String,
+    pub api: String,
 }
 
 pub struct VabaCore {
@@ -152,6 +167,12 @@ pub struct VabaCore {
     // decide values
     decide_values: BTreeMap<View, PromoteValueWithProof>,
 
+    // waiting resp message
+    waiting_resp_msg: Arc<Mutex<BTreeMap<IdempotentId, WaitRespMessage>>>,
+
+    id_generator: SnowflakeGenerator,
+    last_resend_time: Arc<Mutex<u64>>,
+
     threshold_signature: ThresholdSignatureScheme,
     threshold_coin_tossing: ThresholdCoinTossing,
 }
@@ -200,6 +221,9 @@ impl VabaCore {
             view_leader: BTreeMap::new(),
             stop: false,
             decide_values: BTreeMap::new(),
+            waiting_resp_msg: Arc::new(Mutex::new(BTreeMap::new())),
+            id_generator: SnowflakeGenerator::new(node_id),
+            last_resend_time: Arc::new(Mutex::new(0)),
             threshold_signature: ThresholdSignatureScheme::new(threshold - 1, &node_ids),
             threshold_coin_tossing: ThresholdCoinTossing::new(faulty, &node_ids),
         }
@@ -212,12 +236,57 @@ impl VabaCore {
         ret
     }
 
+    async fn resend_message(&self) -> Result<()> {
+        let timestamp = Utc::now().timestamp_millis() as u64;
+        {
+            let mut last_resend_time = self.last_resend_time.lock().await;
+            //info!("last: {}, now: {}", last_resend_time, timestamp);
+            if *last_resend_time > timestamp - RESEND_INTERNAL_MS {
+                return Ok(());
+            }
+            *last_resend_time = timestamp;
+        }
+        let wait_resp = self.waiting_resp_msg.lock().await;
+        for (id, wait_resp) in wait_resp.iter() {
+            let msg_ts = SnowflakeGenerator::timestamp(*id);
+            if msg_ts > timestamp - RESEND_INTERNAL_MS {
+                break;
+            }
+            if let Some(address) = self.nodes.get(&wait_resp.to) {
+                info!("re-send id {} msg to node {}", id, wait_resp.to);
+
+                let uri = format!("http://{}/{}", address, wait_resp.api);
+                let resp = self
+                    .http_client
+                    .post(uri)
+                    .header("Content-Type", "application/json")
+                    .body(wait_resp.msg.clone())
+                    .send()
+                    .await;
+
+                if let Err(e) = resp {
+                    error!(
+                        "re-send response data to node {}/{} error: {:?}",
+                        wait_resp.to, address, e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn main_loop(&mut self) -> Result<()> {
+        let mut resend;
         loop {
+            /*
             info!(
                 "current view {} state: {:?}",
                 self.state.current, self.promote_state
             );
+            */
+            resend = false;
+            let timeout_future = sleep(Duration::from_millis(RESEND_INTERNAL_MS));
             self.update().await?;
 
             futures::select_biased! {
@@ -229,13 +298,50 @@ impl VabaCore {
                             break;
                         }
                     };
+                },
+
+                _ = timeout_future.fuse() => {
+                    resend = true;
+                    self.resend_message().await?;
                 }
+
+            }
+
+            if !resend {
+                self.resend_message().await?;
             }
         }
         Ok(())
     }
 
     async fn handle_message(&mut self, msg: Message) -> Result<()> {
+        if let Some((idempotent_id, to)) = msg.idempotent_id_and_node_id() {
+            let resp_msg = RespMessage {
+                id: idempotent_id,
+                node_id: self.node_id,
+            };
+            let json = serde_json::to_string(&resp_msg)?;
+
+            if let Some(address) = self.nodes.get(&to) {
+                info!("response msg {} to node {}", idempotent_id, to);
+                let uri = format!("http://{}/{}", address, "response");
+                let resp = self
+                    .http_client
+                    .post(uri)
+                    .header("Content-Type", "application/json")
+                    .body(json.to_string())
+                    .send()
+                    .await;
+
+                if let Err(e) = resp {
+                    error!(
+                        "send response data to node {}/{} error: {:?}",
+                        to, address, e
+                    );
+                }
+            }
+        }
+
         match msg {
             Message::Proposal(proposal) => {
                 self.metrics.incr_recv_proposal();
@@ -247,7 +353,9 @@ impl VabaCore {
                 self.proposal_sender
                     .insert(proposal.message_id, proposal.sender);
             }
-            Message::Promote(promote) => self.handle_promote_message(promote).await?,
+            Message::Promote(promote) => {
+                self.handle_promote_message(promote).await?;
+            }
             Message::Ack(ack) => self.handle_ack_message(ack).await?,
             Message::Done(done) => {
                 let msg_hash = MessageHash {
@@ -306,21 +414,24 @@ impl VabaCore {
                 let signs = vec![(self.node_id, share_sign.clone())];
                 self.skip_share_signs.insert(done.view, signs);
 
-                let skip_share_msg = SkipShareMessage {
-                    node_id: self.node_id,
-                    from: done.node_id,
-                    view: done.view,
-                    share_proof: share_sign,
-                    message_id: done.value.message_id,
-                };
-                let json = serde_json::to_string(&skip_share_msg)?;
-
                 // send skip-share message to all parties
                 for (node_id, address) in &self.nodes {
                     if *node_id == self.node_id {
                         continue;
                     }
-                    self.send("skip-share", &json, node_id, address).await?;
+
+                    let idempotent_id = self.generate_idempotent_id();
+                    let skip_share_msg = SkipShareMessage {
+                        node_id: self.node_id,
+                        from: done.node_id,
+                        view: done.view,
+                        share_proof: share_sign.clone(),
+                        message_id: done.value.message_id,
+                        idempotent_id,
+                    };
+                    let json = serde_json::to_string(&skip_share_msg)?;
+                    self.send("skip-share", &json, node_id, address, idempotent_id)
+                        .await?;
                 }
             }
             Message::SkipShare(skip_share) => {
@@ -360,21 +471,24 @@ impl VabaCore {
                     }
                 };
                 // send `SKIP` message to all parties
-                let skip_message = SkipMessage {
-                    node_id: self.node_id,
-                    from: skip_share.from,
-                    view: skip_share.view,
-                    proof: signature,
-                    message_id: skip_share.message_id,
-                };
-                let msg_str = serde_json::to_string(&skip_message)?;
                 for (node_id, address) in &self.nodes {
                     /*
                     if *node_id == self.node_id {
                         continue;
                     }
                     */
-                    self.send("skip", &msg_str, node_id, address).await?;
+                    let idempotent_id = self.generate_idempotent_id();
+                    let skip_message = SkipMessage {
+                        node_id: self.node_id,
+                        from: skip_share.from,
+                        view: skip_share.view,
+                        proof: signature.clone(),
+                        message_id: skip_share.message_id,
+                        idempotent_id,
+                    };
+                    let msg_str = serde_json::to_string(&skip_message)?;
+                    self.send("skip", &msg_str, node_id, address, idempotent_id)
+                        .await?;
                 }
 
                 // mark send `SKIP` message in this view
@@ -415,21 +529,25 @@ impl VabaCore {
                 if !self.send_skip.contains(&view) {
                     self.send_skip.insert(view);
                     // send `SKIP` message to all parties
-                    let skip_message = SkipMessage {
-                        node_id: self.node_id,
-                        from: skip.from,
-                        view: skip.view,
-                        proof: skip.proof.clone(),
-                        message_id: skip.message_id,
-                    };
-                    let msg_str = serde_json::to_string(&skip_message)?;
+
                     for (node_id, address) in &self.nodes {
                         /*
                         if *node_id == self.node_id {
                             continue;
                         }
                         */
-                        self.send("skip", &msg_str, node_id, address).await?;
+                        let idempotent_id = self.generate_idempotent_id();
+                        let skip_message = SkipMessage {
+                            node_id: self.node_id,
+                            from: skip.from,
+                            view: skip.view,
+                            proof: skip.proof.clone(),
+                            message_id: skip.message_id,
+                            idempotent_id,
+                        };
+                        let msg_str = serde_json::to_string(&skip_message)?;
+                        self.send("skip", &msg_str, node_id, address, idempotent_id)
+                            .await?;
                     }
                 }
 
@@ -541,6 +659,12 @@ impl VabaCore {
                 if let Err(e) = metrics.sender.send(resp) {
                     error!("resp metrics message to client error {:?}", e);
                 }
+            }
+            Message::Response(resp) => {
+                info!("recv response msg of {}", resp.id);
+                // when recv response mesage, remove the message to avoid re-send message
+                let mut wait_resp = self.waiting_resp_msg.lock().await;
+                assert!(wait_resp.remove(&resp.id).is_some());
             }
         }
         Ok(())
@@ -666,14 +790,6 @@ impl VabaCore {
         let msg = serde_json::to_string(&coin_share)?;
         let coin_share = coin_tossing.coin_share(self.node_id, &msg)?;
 
-        let msg = ShareMessage {
-            node_id: self.node_id,
-            view,
-            proof: coin_share,
-            message_id,
-        };
-        let json = serde_json::to_string(&msg)?;
-
         for (node_id, address) in &self.nodes {
             /*
             if *node_id == self.node_id {
@@ -681,7 +797,17 @@ impl VabaCore {
             }
             */
 
-            self.send("share", &json, node_id, address).await?;
+            let idempotent_id = self.generate_idempotent_id();
+            let msg = ShareMessage {
+                node_id: self.node_id,
+                view,
+                proof: coin_share.clone(),
+                message_id,
+                idempotent_id,
+            };
+            let json = serde_json::to_string(&msg)?;
+            self.send("share", &json, node_id, address, idempotent_id)
+                .await?;
         }
         Ok(())
     }
@@ -743,15 +869,18 @@ impl VabaCore {
         // deliver promote value
         self.deliver(&promote).await;
 
+        let idempotent_id = self.generate_idempotent_id();
         let resp = AckMessage {
-            node_id: promote.value.node_id,
-            from: self.node_id,
+            node_id: self.node_id,
+            from: promote.value.node_id,
             message_id: promote.value.message_id,
             stage: promote.stage.clone(),
             share_sign,
+            idempotent_id,
         };
         let json = serde_json::to_string(&resp)?;
-        self.send("ack", &json, from, address).await?;
+        self.send("ack", &json, from, address, idempotent_id)
+            .await?;
 
         Ok(())
     }
@@ -787,7 +916,7 @@ impl VabaCore {
             return Ok(());
         }
 
-        if resp.node_id != self.node_id {
+        if resp.from != self.node_id {
             error!(
                 "recv ack message {} from {} but not the same message, expected message id {}",
                 resp.message_id, resp.node_id, wait_promote_ack.data.value.message_id,
@@ -818,7 +947,7 @@ impl VabaCore {
         let json = serde_json::to_string(&proof_value)?;
         if !self
             .threshold_signature
-            .share_validate(resp.from, &json, &resp.share_sign)
+            .share_validate(resp.node_id, &json, &resp.share_sign)
         {
             error!(
                 "recv stage {:?} ack messgae {} from {} but validate fail",
@@ -828,7 +957,7 @@ impl VabaCore {
         }
 
         let msg_hash = MessageHash {
-            node_id: resp.from,
+            node_id: resp.node_id,
             message_id: resp.message_id,
             view: resp.stage.view,
         };
@@ -859,7 +988,7 @@ impl VabaCore {
         if resp.stage.step == 4 {
             info!(
                 "recv ack message {} from {}, state Done",
-                resp.message_id, resp.node_id,
+                resp.message_id, resp.from,
             );
 
             self.promote_state = PromoteState::Done(
@@ -871,7 +1000,7 @@ impl VabaCore {
             info!(
                 "recv ack message {} from {}, move to step {}",
                 resp.message_id,
-                resp.node_id,
+                resp.from,
                 resp.stage.step + 1,
             );
 
@@ -1080,7 +1209,7 @@ impl VabaCore {
         view: View,
         leader_id: NodeId,
     ) -> Result<bool> {
-        let msg = {
+        let (key, lock, commit) = {
             let deliver = self.deliver.lock().await;
             let view_deliver = if let Some(view_deliver) = deliver.get(&leader_id) {
                 view_deliver
@@ -1096,24 +1225,33 @@ impl VabaCore {
                 return Ok(false);
             };
 
-            ViewChange {
-                node_id: self.node_id,
-                leader_id,
-                view,
-                message_id,
-                key: deliver.key.clone(),
-                lock: deliver.lock.clone(),
-                commit: deliver.commit.clone(),
-            }
+            (
+                deliver.key.clone(),
+                deliver.lock.clone(),
+                deliver.commit.clone(),
+            )
         };
-        let json = serde_json::to_string(&msg)?;
+
         for (node_id, address) in &self.nodes {
             /*
             if *node_id == self.node_id {
                 continue;
             }
             */
-            self.send("view-change", &json, node_id, address).await?;
+            let idempotent_id = self.generate_idempotent_id();
+            let msg = ViewChange {
+                node_id: self.node_id,
+                leader_id,
+                view,
+                message_id,
+                key: key.clone(),
+                lock: lock.clone(),
+                commit: commit.clone(),
+                idempotent_id,
+            };
+            let json = serde_json::to_string(&msg)?;
+            self.send("view-change", &json, node_id, address, idempotent_id)
+                .await?;
         }
         Ok(true)
     }
@@ -1152,7 +1290,14 @@ impl VabaCore {
         }
     }
 
-    async fn send(&self, api: &str, json: &str, to: &NodeId, address: &str) -> Result<()> {
+    async fn send(
+        &self,
+        api: &str,
+        json: &str,
+        to: &NodeId,
+        address: &str,
+        id: IdempotentId,
+    ) -> Result<()> {
         match api {
             "promote" => {
                 self.metrics.incr_send_promote();
@@ -1177,7 +1322,10 @@ impl VabaCore {
             }
             _ => {}
         }
-        info!("node {} send {} msg to node {}", self.node_id, api, to);
+        info!(
+            "node {} send {} {} msg to node {}",
+            self.node_id, id, api, to
+        );
 
         let uri = format!("http://{}/{}", address, api);
         let resp = self
@@ -1189,10 +1337,17 @@ impl VabaCore {
             .await;
         if let Err(e) = resp {
             error!(
-                "send {} data to node {}/{} error: {:?}",
-                api, to, address, e
+                "send {} data to node {}/{} id {} error: {:?}",
+                api, to, address, id, e
             );
         }
+        let wait_message = WaitRespMessage {
+            to: *to,
+            msg: json.to_string(),
+            api: api.to_string(),
+        };
+        let mut wait_resp = self.waiting_resp_msg.lock().await;
+        wait_resp.insert(id, wait_message);
 
         Ok(())
     }
@@ -1203,20 +1358,23 @@ impl VabaCore {
         value: &PromoteValue,
         signature: &Signature,
     ) -> Result<PromoteState> {
-        let message = DoneMessage {
-            node_id: self.node_id,
-            value: value.clone(),
-            proof: signature.clone(),
-            view: *view,
-        };
-        let json = serde_json::to_string(&message)?;
         for (node_id, address) in &self.nodes {
             /*
             if *node_id == self.node_id {
                 continue;
             }
             */
-            self.send("done", &json, node_id, address).await?;
+            let idempotent_id = self.generate_idempotent_id();
+            let message = DoneMessage {
+                node_id: self.node_id,
+                value: value.clone(),
+                proof: signature.clone(),
+                view: *view,
+                idempotent_id,
+            };
+            let json = serde_json::to_string(&message)?;
+            self.send("done", &json, node_id, address, idempotent_id)
+                .await?;
         }
         Ok(PromoteState::WaitSkip)
     }
@@ -1255,19 +1413,6 @@ impl VabaCore {
         ack.share_signs.insert(msg_hash, share_sign);
         */
 
-        let message = PromoteMessage {
-            stage: Stage {
-                step,
-                view: promote.view,
-            },
-            value: promote.value.clone(),
-            proof: promote.proof.clone(),
-        };
-        let json = serde_json::to_string(&message)?;
-        info!(
-            "promote stage {:?} for message {:?}",
-            message.stage, message
-        );
         for (node_id, address) in &self.nodes {
             /*
             if *node_id == self.node_id {
@@ -1275,9 +1420,25 @@ impl VabaCore {
                 continue;
             }
             */
-            self.send("promote", &json, node_id, address).await?;
+            let idempotent_id = self.generate_idempotent_id();
+            let message = PromoteMessage {
+                stage: Stage {
+                    step,
+                    view: promote.view,
+                },
+                value: promote.value.clone(),
+                proof: promote.proof.clone(),
+                idempotent_id,
+            };
+            let json = serde_json::to_string(&message)?;
+            self.send("promote", &json, node_id, address, idempotent_id)
+                .await?;
         }
         Ok(PromoteState::WaitAck(ack))
+    }
+
+    fn generate_idempotent_id(&self) -> IdempotentId {
+        self.id_generator.generate()
     }
 }
 

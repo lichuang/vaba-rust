@@ -4,6 +4,8 @@ use threshold_crypto::{Signature, SignatureShare};
 
 use crate::base::{MessageId, NodeId, Step, Value, View};
 
+pub type IdempotentId = u64;
+
 // a 4-stage proof,
 // 1) if step == 1, proof = None
 // 2) if step > 1: proof = signature of this view step - 1
