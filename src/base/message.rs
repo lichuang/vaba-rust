@@ -6,7 +6,7 @@ use crate::{
     crypto::CoinShare,
 };
 
-use super::{MessageId, NodeId, Step, Value, View};
+use super::{MessageId, NodeId, Value, View};
 
 // message between http handlers and vaba core
 pub enum Message {

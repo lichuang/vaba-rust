@@ -9,7 +9,6 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 
 type MessageId = u64;
 
@@ -83,7 +82,7 @@ impl NodeClient {
 
 struct NodeHandle {
     pub tx_api: UnboundedSender<NodeValue>,
-    pub handle: JoinHandle<std::result::Result<(), anyhow::Error>>,
+    //pub handle: JoinHandle<std::result::Result<(), anyhow::Error>>,
 }
 
 #[tokio::main]
@@ -102,8 +101,8 @@ async fn main() -> anyhow::Result<()> {
             let address = value.as_str().unwrap().to_string();
             let node = NodeClient::new(id, address.clone(), rx_api);
 
-            let handle = spawn(node.main());
-            let node_handle = NodeHandle { tx_api, handle };
+            let _handle = spawn(node.main());
+            let node_handle = NodeHandle { tx_api };
 
             nodes.insert(id, node_handle);
             nodes_address.insert(id, address);
@@ -123,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
         threshold
     );
 
-    let mut total_time = 0;
+    //let mut total_time = 0;
     for i in 0..args.number {
         println!("proposal value {}", i);
         let start = Instant::now();
@@ -158,8 +157,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        let time = Instant::now().duration_since(start).as_millis();
-        total_time += time;
+        //let time = Instant::now().duration_since(start).as_millis();
+        //total_time += time;
     }
 
     let http_client = Client::new();
