@@ -1455,13 +1455,16 @@ impl DeliverValue {
 #[cfg(test)]
 mod tests {
 
+    use std::collections::BTreeSet;
+
     use anyhow::Result;
+    use rand::Rng;
     use threshold_crypto::{Signature, SignatureShare};
 
     use crate::{
         base::{NodeId, Step},
         core::{PromoteValue, ProofValue, Stage},
-        crypto::ThresholdSignatureScheme,
+        crypto::{ThresholdSignatureScheme, SEED},
     };
 
     #[test]
@@ -1543,6 +1546,130 @@ mod tests {
                         in_proof = Some(threshold_signature.threshold_sign(&share_signs)?);
                     }
                 }
+            }
+
+            // move to the next view and new promote value
+            view += 1;
+            value += 1;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_4stage_promote_with_adversary() -> Result<()> {
+        // first create nodes and threshold signature
+        let node_ids: Vec<NodeId> = vec![0, 1, 2, 4, 5, 6];
+        let faulty = node_ids.len() / 3;
+        let threshold = node_ids.len() - faulty - 1;
+        let threshold_signature = ThresholdSignatureScheme::new(threshold - 1, &node_ids);
+
+        // select nodes as adversary randomly
+        let mut adversary_ids = BTreeSet::new();
+        while adversary_ids.len() < faulty {
+            let mut rng = rand::thread_rng();
+            let random: usize = rng.gen();
+            adversary_ids.insert(node_ids[random % node_ids.len()]);
+        }
+        // create a fake ThresholdSignatureScheme, so adversary_id can use it to corrupt the system
+        let fake_threshold_signature: ThresholdSignatureScheme = loop {
+            let mut rng = rand::thread_rng();
+            let fake_seed: [u8; 32] = rng.gen();
+            if fake_seed == SEED {
+                // continue to generate a seed different with ThresholdSignatureScheme::SEED
+                continue;
+            }
+
+            break ThresholdSignatureScheme::with_seed(threshold - 1, &node_ids, fake_seed);
+        };
+
+        let mut value = 0;
+        let mut view = 1;
+
+        // iterator node ids, make each of them as a view promoter
+        for i in &node_ids {
+            let promoter = *i as NodeId;
+            // for each view, when step=1 the in proof is None
+            let mut in_proof: Option<Signature> = None;
+
+            // create promote value
+            let promote_value = PromoteValue {
+                node_id: promoter,
+                value: value.to_string(),
+                message_id: value,
+            };
+
+            // the 4 step promote
+            for step in 1..5 {
+                println!(
+                    "run view: {}, step: {}, promoter: {}, value: {}",
+                    view, step, promoter, value
+                );
+
+                // if there is proof of last step, validate it
+                if let Some(in_proof) = &in_proof {
+                    // in proof is not None only when step > 1
+                    assert!(step > 1);
+
+                    // validate the in proof of last step
+                    let proof_value = ProofValue {
+                        stage: Stage {
+                            step: step - 1 as Step,
+                            view,
+                        },
+                        value: promote_value.clone(),
+                    };
+                    let json = serde_json::to_string(&proof_value)?;
+
+                    assert!(threshold_signature.threshold_validate(&json, in_proof));
+                } else {
+                    // in proof is None only when step=1
+                    assert!(step == 1);
+                }
+
+                // validate last step promote value success,
+                // now each node generate their share signature of this step
+
+                // proof value of this step
+                let proof_value = ProofValue {
+                    stage: Stage {
+                        step: step as Step,
+                        view,
+                    },
+                    value: promote_value.clone(),
+                };
+                let json = serde_json::to_string(&proof_value)?;
+                let mut share_signs: Vec<(NodeId, SignatureShare)> = Vec::new();
+                // reset the proof before nodes generating share sign loop
+                in_proof = None;
+                for i in &node_ids {
+                    let id = *i;
+
+                    let share_sign = if !adversary_ids.contains(&id) {
+                        // each node generate their share signature of this step
+                        let share_sign = threshold_signature.share_sign(id, &json)?;
+                        // assert the share signature is validate
+                        assert!(threshold_signature.share_validate(id, &json, &share_sign));
+                        share_sign
+                    } else {
+                        // generate a fake share signature of this step
+                        let share_sign = fake_threshold_signature.share_sign(id, &json)?;
+                        // assert the fake share signature is invalidate
+                        assert!(!threshold_signature.share_validate(id, &json, &share_sign));
+                        share_sign
+                    };
+
+                    // only when the share signature is validate, push it into share_signs
+                    if threshold_signature.share_validate(id, &json, &share_sign) {
+                        share_signs.push((id, share_sign));
+                    }
+                    // collect enough validate share signature, create threshold signature as in proof for the next step
+                    if share_signs.len() == threshold {
+                        // save the in proof for the next step
+                        in_proof = Some(threshold_signature.threshold_sign(&share_signs)?);
+                    }
+                }
+                // when out of nodes generating share sign loop, assert the proof is generated
+                assert!(in_proof.is_some());
             }
 
             // move to the next view and new promote value
